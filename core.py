@@ -1,5 +1,7 @@
 import secrets
 import string
+import json 
+
 
 history = []
 
@@ -45,3 +47,13 @@ def check_strength(password):
     if len(password) >= 12 and has_digit and has_upper and has_symbol:
         return "Сильный"
     return "Средний"
+
+def save_history(filename):
+    with open(filename, "w") as f:
+        json.dump(history, f)
+
+
+def load_history(filename):
+    global history
+    with open(filename, "r") as f:
+        history = json.load(f)

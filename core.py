@@ -5,10 +5,19 @@ import json
 
 from datetime import datetime
 
+def log_call(func):        # декоратор — снаружи класса
+    def wrapper(*args, **kwargs):
+        print(f"Вызов: {func.__name__}")
+        return func(*args, **kwargs)
+    return wrapper
+
+
 class PasswordManager ():
+
     def __init__(self):
         self.history = [] 
-
+        
+    @log_call
     def gen_password(self, length=16, digits=True, symbols=True):
         if length < 4:
             raise ValueError("Минимальная длина 4")

@@ -40,7 +40,7 @@ def run_app():
 
     root = tk.Tk()
     root.title("AWPassword generator")
-    root.geometry("240x240")
+    root.geometry("240x260")
 
     result = tk.StringVar()
     length_var = tk.StringVar(value="16")

@@ -1,15 +1,20 @@
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
-from core import gen_password, get_history, check_strength, save_history, load_history, clear_history
+from core import PasswordManager
+
+manager = PasswordManager()
+
 
 def run_app():
+
+
     def generate():
         try:
             length = int(float(length_var.get()))
             
 
-            result.set(gen_password(length, digits_var.get(),symbols_var.get()))
-            strength_var.set(check_strength(result.get()))
+            result.set(manager.gen_password(length, digits_var.get(), symbols_var.get()))
+            strength_var.set(manager.check_strength(result.get()))
 
         except ValueError as e:
             messagebox.showerror("Ошибка", str(e))
@@ -21,21 +26,22 @@ def run_app():
     def show_history():
         win = tk.Toplevel(root)
         win.title("История")
-        for pwd in get_history():
-            ttk.Label(win, text=pwd).pack()
+        for pwd in manager.get_history():
+            ttk.Label(win, text=f"{pwd['created']}  {pwd['password']}").pack()
+
 
     def save():
         filename = filedialog.asksaveasfilename()  # ascs → asks (опечатка)
         if filename:
-            save_history(filename)
+            manager.save_history(filename)
 
     def load():
         filename = filedialog.askopenfilename()
         if filename:
-            load_history(filename)
+            manager.load_history(filename)
     
     def clear():
-        clear_history()
+        manager.clear_history()
 
 
     root = tk.Tk()

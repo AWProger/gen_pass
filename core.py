@@ -3,6 +3,8 @@ import string
 
 import json 
 
+from datetime import datetime
+
 class PasswordManager ():
     def __init__(self):
         self.history = [] 
@@ -33,10 +35,14 @@ class PasswordManager ():
         secrets.SystemRandom().shuffle(password)
         
         password_str = ''.join(password)  # собираем список в строку
-        self.history.append(password_str)      # добавляем строку в историю
+        self.history.append({
+            "password": password_str,
+            "created": datetime.now().strftime("%Y-%m-%d %H:%M")
+        })
+     # добавляем строку в историю
         return password_str     
 
-    def get_history():
+    def get_history(self):
         return self.history.copy()
 
     def check_strength(self, password):
@@ -59,6 +65,6 @@ class PasswordManager ():
         with open(filename, "r") as f:
             self.history = json.load(f)
 
-    def clear_history():
+    def clear_history(self):
         self.history.clear()
         

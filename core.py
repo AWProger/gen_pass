@@ -1,5 +1,6 @@
 import secrets
 import string
+
 import json 
 
 
@@ -57,3 +58,7 @@ def load_history(filename):
     global history
     with open(filename, "r") as f:
         history = json.load(f)
+
+def clear_history():
+    global history
+    history.clear()

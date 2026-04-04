@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# Виртуальное окружение
+venv/
+.env
+
+# Сохранённые пароли — никогда не пушим в git
+*.json

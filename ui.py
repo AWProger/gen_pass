@@ -28,13 +28,20 @@ def run_app():
     def show_history():
         win = tk.Toplevel(root)
         win.title("История")
+        
+        text = tk.Text(win, width=50, height=20)
+        text.pack()
+        
         for pwd in manager.get_history():
-            ttk.Label(win, text=f"Дата:    {pwd['created']}").pack(anchor="w")
-            ttk.Label(win, text=f"Сайт:    {pwd['site']}").pack(anchor="w")
-            ttk.Label(win, text=f"Емайл:   {pwd['email']}").pack(anchor="w")
-            ttk.Label(win, text=f"Логин:   {pwd['login']}").pack(anchor="w")
-            ttk.Label(win, text=f"Пароль:  {pwd['password']}").pack(anchor="w")
-            ttk.Separator(win, orient="horizontal").pack(fill="x", pady=5)
+            text.insert("end", f"ID:      {pwd['id']}\n")
+            text.insert("end", f"Дата:    {pwd['created']}\n")
+            text.insert("end", f"Сайт:    {pwd['site']}\n")
+            text.insert("end", f"Емайл:   {pwd['email']}\n")
+            text.insert("end", f"Логин:   {pwd['login']}\n")
+            text.insert("end", f"Пароль:  {pwd['password']}\n")
+            text.insert("end", "-" * 40 + "\n")
+        
+        text.config(state="disabled")  # запретить редактирование
 
 
     def save():
@@ -50,10 +57,26 @@ def run_app():
     def clear():
         manager.clear_history()
 
+    def delete_record():
+        manager.delete_by_id()
+
+    def show_search():
+        win = tk.Toplevel(root)
+        win.title("Результаты поиска")
+        for pwd in manager.search(search_var.get()):
+            ttk.Label(win, text=f"Дата:    {pwd['created']}").pack(anchor="w")
+            ttk.Label(win, text=f"Сайт:    {pwd['site']}").pack(anchor="w")
+            ttk.Label(win, text=f"Емайл:   {pwd['email']}").pack(anchor="w")
+            ttk.Label(win, text=f"Логин:   {pwd['login']}").pack(anchor="w")
+            ttk.Label(win, text=f"Пароль:  {pwd['password']}").pack(anchor="w")
+            ttk.Separator(win, orient="horizontal").pack(fill="x", pady=5)
+
+
+
 
     root = tk.Tk()
     root.title("AWPassword generator")
-    root.geometry("200x410")
+    root.geometry("200x500")
 
     result = tk.StringVar()
     length_var = tk.StringVar(value="16")
@@ -65,6 +88,8 @@ def run_app():
     site_var = tk.StringVar()
     email_var = tk.StringVar()
     login_var = tk.StringVar()
+
+    search_var = tk.StringVar()
 
     ttk.Label(root, text="Длина").pack()
     ttk.Scale(root, from_=4, to=32, variable=length_var, orient="horizontal",
@@ -84,6 +109,12 @@ def run_app():
     ttk.Entry(root, textvariable=email_var).pack()
     ttk.Label(root, text="Логин").pack()
     ttk.Entry(root, textvariable=login_var).pack()
+
+    ttk.Label(root, text="Поиск").pack()
+    ttk.Entry(root, textvariable=search_var).pack()
+    ttk.Button(root, text="Поиск", command=show_search).pack()
+
+    ttk.Button(root, text="Удалить", command=show_search).pack()
 
     ttk.Button(root, text="Сгенерировать", command=generate).pack()
     ttk.Button(root, text="Копировать", command=copy).pack()

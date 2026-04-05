@@ -1,8 +1,10 @@
 import secrets
 import string
 import json 
+import uuid
 
 from datetime import datetime
+
 
 def log_call(func):        # декоратор — снаружи класса
     def wrapper(*args, **kwargs):
@@ -43,6 +45,7 @@ class PasswordManager ():
         
         password_str = ''.join(password)  # собираем список в строку
         self.history.append({
+            "id": str(uuid.uuid4()),
             "site": site,
             "login": login,
             "email": email,
@@ -54,7 +57,7 @@ class PasswordManager ():
     @log_call
     def get_history(self):
         return self.history.copy()
-        
+
     @log_call
     def check_strength(self, password):
         has_digit = any(c.isdigit() for c in password)
@@ -80,3 +83,14 @@ class PasswordManager ():
     @log_call
     def clear_history(self):
         self.history.clear()
+
+    def search(self, query):
+        query = query.lower()
+        return [e for e in self.history if 
+                query in e["site"].lower() or 
+                query in e["login"].lower() or 
+                query in e["email"].lower()]
+                
+    @log_call
+    def delete_by_id(self, record_id):
+        self.history = [e for e in self.history if e["id"] != record_id]

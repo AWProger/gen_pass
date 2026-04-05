@@ -1,6 +1,5 @@
 import secrets
 import string
-
 import json 
 
 from datetime import datetime
@@ -11,14 +10,13 @@ def log_call(func):        # декоратор — снаружи класса
         return func(*args, **kwargs)
     return wrapper
 
-
 class PasswordManager ():
 
     def __init__(self):
         self.history = [] 
-        
+
     @log_call
-    def gen_password(self, length=16, digits=True, symbols=True):
+    def gen_password(self, length=16, digits=True, symbols=True, site="", login="", email=""):
         if length < 4:
             raise ValueError("Минимальная длина 4")
 
@@ -45,15 +43,19 @@ class PasswordManager ():
         
         password_str = ''.join(password)  # собираем список в строку
         self.history.append({
+            "site": site,
+            "login": login,
+            "email": email,
             "password": password_str,
             "created": datetime.now().strftime("%Y-%m-%d %H:%M")
         })
      # добавляем строку в историю
         return password_str     
-
+    @log_call
     def get_history(self):
         return self.history.copy()
-
+        
+    @log_call
     def check_strength(self, password):
         has_digit = any(c.isdigit() for c in password)
         has_upper = any(c.isupper() for c in password)
@@ -65,15 +67,16 @@ class PasswordManager ():
             return "Сильный"
         return "Средний"
 
+    @log_call
     def save_history(self, filename):
         with open(filename, "w") as f:
             json.dump(self.history, f)
 
-
+    @log_call
     def load_history(self, filename):
         with open(filename, "r") as f:
             self.history = json.load(f)
 
+    @log_call
     def clear_history(self):
         self.history.clear()
-        

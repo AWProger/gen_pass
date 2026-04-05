@@ -13,7 +13,8 @@ def run_app():
             length = int(float(length_var.get()))
             
 
-            result.set(manager.gen_password(length, digits_var.get(), symbols_var.get()))
+            result.set(manager.gen_password(length, digits_var.get(), symbols_var.get(), site_var.get(), login_var.get(), email_var.get()))
+
             strength_var.set(manager.check_strength(result.get()))
 
         except ValueError as e:
@@ -23,11 +24,17 @@ def run_app():
         root.clipboard_clear()
         root.clipboard_append(result.get())
 
+
     def show_history():
         win = tk.Toplevel(root)
         win.title("История")
         for pwd in manager.get_history():
-            ttk.Label(win, text=f"{pwd['created']}  {pwd['password']}").pack()
+            ttk.Label(win, text=f"Дата:    {pwd['created']}").pack(anchor="w")
+            ttk.Label(win, text=f"Сайт:    {pwd['site']}").pack(anchor="w")
+            ttk.Label(win, text=f"Емайл:   {pwd['email']}").pack(anchor="w")
+            ttk.Label(win, text=f"Логин:   {pwd['login']}").pack(anchor="w")
+            ttk.Label(win, text=f"Пароль:  {pwd['password']}").pack(anchor="w")
+            ttk.Separator(win, orient="horizontal").pack(fill="x", pady=5)
 
 
     def save():
@@ -46,7 +53,7 @@ def run_app():
 
     root = tk.Tk()
     root.title("AWPassword generator")
-    root.geometry("240x260")
+    root.geometry("200x410")
 
     result = tk.StringVar()
     length_var = tk.StringVar(value="16")
@@ -55,6 +62,9 @@ def run_app():
     strength_var = tk.StringVar()
     length_label_var = tk.IntVar(value=16)
 
+    site_var = tk.StringVar()
+    email_var = tk.StringVar()
+    login_var = tk.StringVar()
 
     ttk.Label(root, text="Длина").pack()
     ttk.Scale(root, from_=4, to=32, variable=length_var, orient="horizontal",
@@ -67,6 +77,13 @@ def run_app():
     ttk.Checkbutton(root, text="Символы", variable=symbols_var).pack()
 
     ttk.Entry(root, textvariable=result, width=30).pack(pady=5)
+
+    ttk.Label(root, text="Сайт").pack()
+    ttk.Entry(root, textvariable=site_var).pack()
+    ttk.Label(root, text="Емайл").pack()
+    ttk.Entry(root, textvariable=email_var).pack()
+    ttk.Label(root, text="Логин").pack()
+    ttk.Entry(root, textvariable=login_var).pack()
 
     ttk.Button(root, text="Сгенерировать", command=generate).pack()
     ttk.Button(root, text="Копировать", command=copy).pack()

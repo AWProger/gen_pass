@@ -110,13 +110,14 @@ def run_app():
     ttk.Label(root, text="Логин").pack()
     ttk.Entry(root, textvariable=login_var).pack()
 
+    ttk.Button(root, text="Сгенерировать", command=generate).pack()
+    
     ttk.Label(root, text="Поиск").pack()
     ttk.Entry(root, textvariable=search_var).pack()
     ttk.Button(root, text="Поиск", command=show_search).pack()
 
     ttk.Button(root, text="Удалить", command=show_search).pack()
 
-    ttk.Button(root, text="Сгенерировать", command=generate).pack()
     ttk.Button(root, text="Копировать", command=copy).pack()
     ttk.Button(root, text="История", command=show_history).pack()
 

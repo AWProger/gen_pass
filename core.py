@@ -90,7 +90,14 @@ class PasswordManager ():
                 query in e["site"].lower() or 
                 query in e["login"].lower() or 
                 query in e["email"].lower()]
-                
+
     @log_call
     def delete_by_id(self, record_id):
         self.history = [e for e in self.history if e["id"] != record_id]
+
+    @log_call
+    def edit_by_id(self, record_id, **kwargs):
+        for e in self.history:
+            if e["id"] == record_id:
+                e.update(kwargs)
+                break

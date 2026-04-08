@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="UTF-8">
+    <title>AWPassword Manager</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+
+<body>
+    <h1>AWPassword Manager</h1>
+    <p>Веб-версия менеджера паролей</p>
+    <div class="form-group">
+        <label>Длина</label>
+        <input type="range" min="4" max="32" value="16" id="length">
+    </div>
+
+    <div class="form-group">
+        <label><input type="checkbox" id="digits" checked> Цифры</label>
+    </div>
+
+    <div class="form-group">
+        <label><input type="checkbox" id="symbols" checked> Символы</label>
+    </div>
+
+    <div class="form-group">
+        <label>Сайт</label>
+        <input type="text" id="site">
+    </div>
+
+    <div class="form-group">
+        <label>Емайл</label>
+        <input type="email" id="email">
+    </div>
+
+    <div class="form-group">
+        <label>Логин</label>
+        <input type="text" id="login">
+    </div>
+
+    <button id="generate">Сгенерировать</button>
+
+    <div class="form-group">
+        <label>Результат</label>
+        <input type="text" id="result" readonly>
+    </div>
+    <button onclick="loadHistory()">История</button>
+    <div id="history-list"></div>
+
+    <div class="form-group">
+        <label>Поиск</label>
+        <input type="text" id="search-input">
+    </div>
+    <button onclick="search()">Поиск</button>
+    <div id="search-results"></div>
+
+
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+
+</html>

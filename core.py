@@ -3,6 +3,8 @@ import string
 import json 
 import uuid
 
+from cryptography.fernet import Fernet 
+
 from datetime import datetime
 
 
@@ -15,7 +17,9 @@ def log_call(func):        # декоратор — снаружи класса
 class PasswordManager ():
 
     def __init__(self):
-        self.history = [] 
+        self.history = []
+        self.key = Fernet.generate_key()
+        self.f = Fernet(self.key)
 
     @log_call
     def gen_password(self, length=16, digits=True, symbols=True, site="", login="", email=""):
@@ -72,13 +76,17 @@ class PasswordManager ():
 
     @log_call
     def save_history(self, filename):
-        with open(filename, "w") as f:
-            json.dump(self.history, f)
+        json_str = json.dumps(self.history)
+        encrypted = self.encrypt_data(json_str)
+        with open(filename, "wb") as f:
+            f.write(encrypted)
 
     @log_call
     def load_history(self, filename):
-        with open(filename, "r") as f:
-            self.history = json.load(f)
+        with open(filename, "rb") as f:
+            encrypted = f.read()
+        json_str = self.decrypt_data(encrypted)
+        self.history = json.loads(json_str)
 
     @log_call
     def clear_history(self):
@@ -101,3 +109,10 @@ class PasswordManager ():
             if e["id"] == record_id:
                 e.update(kwargs)
                 break
+                
+    def encrypt_data(self, data):
+        return self.f.encrypt(data.encode())
+
+    def decrypt_data(self, data):
+        return self.f.decrypt(data).decode()
+        

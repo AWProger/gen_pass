@@ -1,20 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""
-PyInstaller specification for gen_pass.
-
-Kept in the repository rather than generated, so a build is reproducible: anyone
-can run `pyinstaller gen_pass.spec` and get the same layout.
-
-Notes on the choices:
-  - onefile: the user gets a single file to download and run. Slower first launch
-    than onedir, which is the correct trade for a program people install once.
-  - console=False: a GUI program. A console window would appear alongside the
-    window and look like a bug.
-  - tkinter is bundled by PyInstaller automatically; it is part of the standard
-    distribution, not an extra dependency.
-  - version info is attached from a file, so the .exe reports a real version in
-    Windows file properties.
-"""
+# PyInstaller specification for gen_pass.
+#
+# ONEFILE, deliberately. The user asked for a single .exe to download and run, and
+# an onedir build silently breaks the moment the .exe is copied out of its folder:
+# PyInstaller's bootloader looks for python3xx.dll and the rest beside itself, fails,
+# and shows a window titled "Error". Shipping the exe alone is the natural thing to
+# do with an onedir build, which is exactly how that bug appeared here.
+#
+# The cost of onefile is a slower first launch, since the archive is unpacked to a
+# temp directory. For a program someone installs once, that is the right trade.
+#
+# Kept in the repository rather than generated, so a build is reproducible.
 
 import sys
 from pathlib import Path
@@ -34,12 +30,11 @@ analysis = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    # The project imports nothing beyond the standard library, so nothing needs
-    # to be collected. Listed explicitly anyway so a future import fails loudly
-    # at build time instead of silently missing at runtime.
+    # The project imports nothing beyond the standard library. flask and
+    # cryptography are named explicitly so a regression cannot slip in quietly.
     excludes=[
-        "flask",           # removed web layer; must never creep back in
-        "cryptography",    # replaced by hashlib
+        "flask",
+        "cryptography",
         "numpy",
         "pandas",
         "PyQt5",
@@ -54,39 +49,27 @@ analysis = Analysis(
 
 pyz = PYZ(analysis.pure, analysis.zipped_data, cipher=block_cipher)
 
+# ONEFILE: binaries, zipfiles and datas go INTO the exe. No COLLECT step.
 exe = EXE(
     pyz,
     analysis.scripts,
+    analysis.binaries,
+    analysis.zipfiles,
+    analysis.datas,
     [],
-    exclude_binaries=True,
     name="Генератор паролей",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,          # smaller binary; skipped automatically if UPX is absent
+    upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=False,     # GUI program: no console window
+    console=False,  # GUI program: no console window
     disable_windowed_traceback=False,
     argv_emulation=False,
-    target_arch=None,  # current machine
+    target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
     icon=str(ICON) if ICON.exists() else None,
     version=str(VERSION_FILE) if VERSION_FILE.exists() else None,
 )
-
-coll = COLLECT(
-    exe,
-    analysis.binaries,
-    analysis.zipfiles,
-    analysis.datas,
-    strip=False,
-    upx=True,
-    upx_exclude=[],
-    name="Генератор паролей",
-)
-
-if sys.platform == "win32":
-    # The default icon is a generic Python one; ship a real one if present.
-    pass

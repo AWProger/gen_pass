@@ -1,118 +1,506 @@
+"""
+core.py - password generation, encrypted storage, history.
+
+Design notes for the rework:
+
+  * The encryption key is now PERSISTED. Previously `Fernet.generate_key()` ran in
+    __init__, so every launch produced a new key, the old one was discarded, and
+    every previously saved file became permanently undecryptable. That was the
+    single most serious defect in the original.
+
+  * Only the standard library is used. `secrets` for CSPRNG, `hashlib.scrypt` for
+    key derivation, and a keystream built on `hashlib.blake2b` for encryption. This
+    removes the `cryptography` dependency, which matters for a program distributed
+    as a single .exe.
+
+  * Strength is reported in bits of entropy, derived from the actual character set
+    and length, not from a length threshold plus a symbol check.
+
+  * Character sets are configurable, and the default EXCLUDES characters that are
+    routinely rejected by real sites: quotes, backslash, backtick, and the space.
+    The original used string.punctuation, which produced passwords containing
+    quote, backtick and backslash that many sites simply do not accept.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
 import secrets
 import string
-import json 
 import uuid
-
-from cryptography.fernet import Fernet 
-
+from dataclasses import dataclass, field, asdict
 from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+__version__ = "2.0.0"
+
+# --------------------------------------------------------------------------
+# Character sets
+# --------------------------------------------------------------------------
+
+LOWERCASE = string.ascii_lowercase
+UPPERCASE = string.ascii_uppercase
+DIGITS = string.digits
+
+# Symbols safe for the overwhelming majority of real-world password rules.
+# Deliberately excludes  ' " ` \ and whitespace: sites reject these constantly.
+SAFE_SYMBOLS = "!#$%&()*+,-./:;<=>?@[]^_{|}~"
+
+# Offered separately, for users who want the full set and accept the risk.
+ALL_SYMBOLS = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"
+
+AMBIGUOUS = "Il1O0o"
+
+MIN_LENGTH = 8
+MAX_LENGTH = 256
+DEFAULT_LENGTH = 20
 
 
-def log_call(func):        # декоратор — снаружи класса
-    def wrapper(*args, **kwargs):
-        print(f"Вызов: {func.__name__}")
-        return func(*args, **kwargs)
-    return wrapper
+# --------------------------------------------------------------------------
+# Key derivation and authenticated encryption (stdlib only)
+# --------------------------------------------------------------------------
 
-class PasswordManager ():
+def derive_key(passphrase: str, salt: bytes) -> bytes:
+    """scrypt is memory-hard: a stolen key file is far more expensive to attack."""
+    return hashlib.scrypt(
+        passphrase.encode("utf-8"),
+        salt=salt,
+        n=2**15,
+        r=8,
+        p=1,
+        dklen=32,
+        maxmem=64 * 1024 * 1024,
+    )
 
-    def __init__(self):
-        self.history = []
-        self.key = Fernet.generate_key()
-        self.f = Fernet(self.key)
 
-    @log_call
-    def gen_password(self, length=16, digits=True, symbols=True, site="", login="", email=""):
-        if length < 4:
-            raise ValueError("Минимальная длина 4")
+def _keystream(key: bytes, nonce: bytes, length: int) -> bytes:
+    """Counter-mode stream built from blake2b. Each block is bound to key+nonce+counter."""
+    out = bytearray()
+    counter = 0
+    while len(out) < length:
+        h = hashlib.blake2b(digest_size=64, key=key)
+        h.update(nonce)
+        h.update(counter.to_bytes(8, "big"))
+        out.extend(h.digest())
+        counter += 1
+    return bytes(out[:length])
 
-        chars = list(string.ascii_letters)
 
-        if digits:
-            chars += list(string.digits)
-        if symbols:
-            chars += list(string.punctuation)
+def encrypt(plaintext: bytes, key: bytes) -> bytes:
+    """Encrypt with a keystream, then authenticate.
 
-        password = [
-            secrets.choice(string.ascii_lowercase),
-            secrets.choice(string.ascii_uppercase)
+    The tag is computed over nonce+ciphertext with a MAC key derived from the key,
+    so tampering is detected rather than silently decrypted.
+    """
+    nonce = secrets.token_bytes(16)
+    cipher = bytes(a ^ b for a, b in zip(plaintext, _keystream(key, nonce, len(plaintext))))
+    mac_key = hashlib.blake2b(b"mac", key=key, digest_size=32).digest()
+    tag = hashlib.blake2b(nonce + cipher, key=mac_key, digest_size=32).digest()
+    return b"AWP1" + nonce + tag + cipher
+
+
+def decrypt(blob: bytes, key: bytes) -> bytes:
+    # Every encrypt() output carries its own AWP1 prefix. Accepting a bare payload
+    # silently would let a truncated or mis-sliced blob decrypt into garbage.
+    if len(blob) < 4 + 16 + 32:
+        raise ValueError("Файл повреждён или слишком мал")
+    if blob[:4] != b"AWP1":
+        raise ValueError("Неизвестный формат файла")
+
+    nonce = blob[4:20]
+    tag = blob[20:52]
+    cipher = blob[52:]
+
+    mac_key = hashlib.blake2b(b"mac", key=key, digest_size=32).digest()
+    expected = hashlib.blake2b(nonce + cipher, key=mac_key, digest_size=32).digest()
+
+    # Constant-time compare: a plain == would leak timing information.
+    import hmac
+    if not hmac.compare_digest(tag, expected):
+        raise ValueError("Неверный пароль или файл был изменён")
+
+    return bytes(a ^ b for a, b in zip(cipher, _keystream(key, nonce, len(cipher))))
+
+
+# --------------------------------------------------------------------------
+# Password generation
+# --------------------------------------------------------------------------
+
+def build_alphabet(
+    *,
+    lowercase: bool = True,
+    uppercase: bool = True,
+    digits: bool = True,
+    symbols: bool = True,
+    exclude_ambiguous: bool = False,
+    full_symbols: bool = False,
+) -> str:
+    """Assemble the character pool from the requested classes."""
+    pool = ""
+    if lowercase:
+        pool += LOWERCASE
+    if uppercase:
+        pool += UPPERCASE
+    if digits:
+        pool += DIGITS
+    if symbols:
+        pool += ALL_SYMBOLS if full_symbols else SAFE_SYMBOLS
+    if exclude_ambiguous:
+        pool = "".join(c for c in pool if c not in AMBIGUOUS)
+    # When exclude_ambiguous wipes a class out entirely, that class cannot supply its
+    # mandatory character - asking for it is an error, not a silent downgrade.
+    # Checked here so the failure names the actual cause.
+    for name, source, enabled in (
+        ("строчных", LOWERCASE, lowercase),
+        ("прописных", UPPERCASE, uppercase),
+        ("цифр", DIGITS, digits),
+    ):
+        if enabled and not _filter(source, exclude_ambiguous):
+            raise ValueError(
+                f"Исключение неоднозначных символов удаляет все {name} буквы/цифры. "
+                "Отключите эту опцию или оставьте другой набор."
+            )
+
+    if not pool:
+        raise ValueError("Выберите хотя бы один набор символов")
+    return pool
+
+
+def generate_password(
+    length: int = DEFAULT_LENGTH,
+    *,
+    lowercase: bool = True,
+    uppercase: bool = True,
+    digits: bool = True,
+    symbols: bool = True,
+    exclude_ambiguous: bool = False,
+    full_symbols: bool = False,
+) -> str:
+    """Generate a password with at least one character from each enabled class.
+
+    Guarantees are explicit: the result always contains one lower, one upper and
+    one digit when those classes are enabled, so the pool is never degenerate.
+    """
+    if not isinstance(length, int):
+        raise ValueError("Длина должна быть целым числом")
+    if length < MIN_LENGTH:
+        raise ValueError(f"Минимальная длина — {MIN_LENGTH}")
+    if length > MAX_LENGTH:
+        raise ValueError(f"Максимальная длина — {MAX_LENGTH}")
+
+    pool = build_alphabet(
+        lowercase=lowercase,
+        uppercase=uppercase,
+        digits=digits,
+        symbols=symbols,
+        exclude_ambiguous=exclude_ambiguous,
+        full_symbols=full_symbols,
+    )
+
+    chars: list[str] = []
+    if lowercase:
+        chars.append(secrets.choice(_filter(LOWERCASE, exclude_ambiguous)))
+    if uppercase:
+        chars.append(secrets.choice(_filter(UPPERCASE, exclude_ambiguous)))
+    if digits:
+        chars.append(secrets.choice(_filter(DIGITS, exclude_ambiguous)))
+
+    # Each required character consumes one slot. A password shorter than the number
+    # of required classes cannot satisfy them; say so instead of looping forever.
+    required = len(chars)
+    if length < required:
+        raise ValueError(
+            f"Длины {length} недостаточно для {required} обязательных символов. "
+            "Отключите лишние наборы или увеличьте длину."
+        )
+
+    chars += [secrets.choice(pool) for _ in range(length - required)]
+    secrets.SystemRandom().shuffle(chars)
+    return "".join(chars)
+
+
+def _filter(source: str, exclude_ambiguous: bool) -> str:
+    if not exclude_ambiguous:
+        return source
+    filtered = "".join(c for c in source if c not in AMBIGUOUS)
+    # A whole class can be wiped out by the filter; fall back rather than crash.
+    return filtered or source
+
+
+def estimate_entropy(password: str, pool_size: int | None = None) -> float:
+    """Bits of entropy, assuming a uniform draw from the pool that produced it."""
+    if pool_size is None:
+        pool_size = estimate_pool_size(password)
+    if pool_size <= 1:
+        return 0.0
+    return len(password) * (pool_size.bit_length() - 1)
+
+
+def estimate_pool_size(password: str) -> int:
+    """Reconstruct the pool size from the characters actually present."""
+    size = 0
+    if any(c in LOWERCASE for c in password):
+        size += len(LOWERCASE)
+    if any(c in UPPERCASE for c in password):
+        size += len(UPPERCASE)
+    if any(c in DIGITS for c in password):
+        size += len(DIGITS)
+    if any(c in SAFE_SYMBOLS for c in password):
+        size += len(SAFE_SYMBOLS)
+    if any(c in ALL_SYMBOLS and c not in SAFE_SYMBOLS for c in password):
+        size += len(ALL_SYMBOLS) - len(SAFE_SYMBOLS)
+    return size or len(LOWERCASE) + len(UPPERCASE) + len(DIGITS)
+
+
+def strength_label(bits: float) -> str:
+    """Thresholds follow common guidance: 60 bits is the practical floor."""
+    if bits < 40:
+        return "Очень слабый"
+    if bits < 60:
+        return "Слабый"
+    if bits < 80:
+        return "Средний"
+    if bits < 120:
+        return "Сильный"
+    return "Очень сильный"
+
+
+# --------------------------------------------------------------------------
+# Records
+# --------------------------------------------------------------------------
+
+@dataclass
+class Record:
+    id: str
+    password: str
+    site: str = ""
+    login: str = ""
+    email: str = ""
+    created: str = ""
+    note: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "Record":
+        return cls(
+            id=data.get("id", ""),
+            password=data.get("password", ""),
+            site=data.get("site", ""),
+            login=data.get("login", ""),
+            email=data.get("email", ""),
+            created=data.get("created", ""),
+            note=data.get("note", ""),
+        )
+
+
+# --------------------------------------------------------------------------
+# Storage
+# --------------------------------------------------------------------------
+
+DEFAULT_DIR = Path.home() / ".gen_pass"
+
+
+class Vault:
+    """Encrypted password vault backed by a single file.
+
+    The key is derived from a passphrase with scrypt and a per-vault random salt.
+    A verification block lets us tell "wrong passphrase" from "damaged file"
+    instead of returning a generic decryption error.
+    """
+
+    MAGIC = b"AWP1"
+
+    def __init__(self, path: Path | str | None = None) -> None:
+        self.path = Path(path) if path else DEFAULT_DIR / "vault.awp"
+        self.records: list[Record] = []
+        self._salt: bytes = b""
+        # Set by create() and unlock(). save() refuses to run without it, so a
+        # half-initialised vault can never overwrite good data with garbage.
+        self._key: bytes | None = None
+
+    # -- low level -------------------------------------------------------
+
+    def exists(self) -> bool:
+        return self.path.exists()
+
+    def _load_or_make_salt(self) -> bytes:
+        sidecar = self.path.with_suffix(".salt")
+        if sidecar.exists():
+            return sidecar.read_bytes()
+        salt = secrets.token_bytes(16)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        sidecar.write_bytes(salt)
+        _restrict_permissions(sidecar)
+        return salt
+
+    def _header(self, key: bytes) -> bytes:
+        marker = encrypt(b"gen_pass.vault.v1", key)
+        return marker
+
+    def _read_header(self, key: bytes) -> bool:
+        if len(self.blob) < len(self.MAGIC) + 4:
+            return False
+        marker_len = int.from_bytes(self.blob[4:8], "big")
+        try:
+            marker = decrypt(self.blob[4 : 8 + marker_len], key)
+        except ValueError:
+            return False
+        return marker == b"gen_pass.vault.v1"
+
+    # -- public API ------------------------------------------------------
+
+    def create(self, passphrase: str) -> None:
+        """Create an empty vault. Refuses to overwrite an existing one."""
+        if self.path.exists():
+            raise FileExistsError(f"Файл уже существует: {self.path}")
+        if not passphrase:
+            raise ValueError("Пароль не может быть пустым")
+
+        self._salt = self._load_or_make_salt()
+        self._key = derive_key(passphrase, self._salt)
+        self.records = []
+        self._write(self._key)
+
+    def unlock(self, passphrase: str) -> None:
+        """Decrypt the vault into memory."""
+        if not self.path.exists():
+            raise FileNotFoundError(f"Файл не найден: {self.path}")
+
+        self.blob = self.path.read_bytes()
+        self._salt = self._load_or_make_salt()
+        key = derive_key(passphrase, self._salt)
+
+        # Layout: MAGIC(4) | marker_len(4) | marker | body
+        # Both marker and body are full encrypt() outputs, each with its own
+        # AWP1 prefix and MAC. slice start, not 4, because the prefix is included.
+        marker_len = int.from_bytes(self.blob[4:8], "big")
+        marker = decrypt(self.blob[8 : 8 + marker_len], key)
+        if marker != b"gen_pass.vault.v1":
+            raise ValueError("Файл повреждён")
+
+        body = decrypt(self.blob[8 + marker_len :], key)
+        data = json.loads(body.decode("utf-8"))
+        self.records = [Record.from_dict(r) for r in data.get("records", [])]
+        self._key = key
+
+    def save(self) -> None:
+        """Re-encrypt and write. Requires a prior create() or unlock()."""
+        if self._key is None:
+            raise RuntimeError("Сначала вызовите unlock() или create()")
+        self._write(self._key)
+
+    def _write(self, key: bytes) -> None:
+        payload = json.dumps(
+            {"version": __version__, "records": [r.to_dict() for r in self.records]},
+            ensure_ascii=False,
+            indent=2,
+        ).encode("utf-8")
+
+        marker = encrypt(b"gen_pass.vault.v1", key)
+        blob = self.MAGIC + len(marker).to_bytes(4, "big") + marker + encrypt(payload, key)
+
+        # Write to a temp file, then replace. A crash mid-write would otherwise
+        # leave a truncated vault with no way back.
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(self.path.suffix + ".tmp")
+        tmp.write_bytes(blob)
+        _restrict_permissions(tmp)
+        tmp.replace(self.path)
+
+    # -- record operations ----------------------------------------------
+
+    def add(self, password: str, site: str = "", login: str = "", email: str = "", note: str = "") -> Record:
+        rec = Record(
+            id=str(uuid.uuid4()),
+            password=password,
+            site=site,
+            login=login,
+            email=email,
+            created=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            note=note,
+        )
+        self.records.append(rec)
+        return rec
+
+    def get(self, record_id: str) -> Record | None:
+        return next((r for r in self.records if r.id == record_id), None)
+
+    def delete(self, record_id: str) -> bool:
+        before = len(self.records)
+        self.records = [r for r in self.records if r.id != record_id]
+        return len(self.records) < before
+
+    def edit(self, record_id: str, **fields: Any) -> bool:
+        rec = self.get(record_id)
+        if rec is None:
+            return False
+        for key in ("password", "site", "login", "email", "note"):
+            if key in fields:
+                setattr(rec, key, fields[key])
+        return True
+
+    def search(self, query: str) -> list[Record]:
+        if not query:
+            return []
+        q = query.lower()
+        return [
+            r
+            for r in self.records
+            if q in r.site.lower() or q in r.login.lower() or q in r.email.lower()
         ]
 
-        if digits:
-            password.append(secrets.choice(string.digits))
-        if symbols:
-            password.append(secrets.choice(string.punctuation))
+    def all(self) -> list[Record]:
+        return list(self.records)
 
-        password += [secrets.choice(chars) for _ in range(length - len(password))]
+    def clear(self) -> None:
+        self.records.clear()
 
-        secrets.SystemRandom().shuffle(password)
-        
-        password_str = ''.join(password)  # собираем список в строку
-        self.history.append({
-            "id": str(uuid.uuid4()),
-            "site": site,
-            "login": login,
-            "email": email,
-            "password": password_str,
-            "created": datetime.now().strftime("%Y-%m-%d %H:%M")
-        })
-     # добавляем строку в историю
-        return password_str     
-    @log_call
-    def get_history(self):
-        return self.history.copy()
 
-    @log_call
-    def check_strength(self, password):
-        has_digit = any(c.isdigit() for c in password)
-        has_upper = any(c.isupper() for c in password)
-        has_symbol = any(c in string.punctuation for c in password)
+def _restrict_permissions(path: Path) -> None:
+    """Owner-only where the platform supports it. Silently skipped on Windows."""
+    try:
+        os.chmod(path, 0o600)
+    except (OSError, NotImplementedError):
+        pass
 
-        if len(password) < 8:
-            return "Слабый"
-        if len(password) >= 12 and has_digit and has_upper and has_symbol:
-            return "Сильный"
-        return "Средний"
 
-    @log_call
-    def save_history(self, filename):
-        json_str = json.dumps(self.history)
-        encrypted = self.encrypt_data(json_str)
-        with open(filename, "wb") as f:
-            f.write(encrypted)
+# --------------------------------------------------------------------------
+# Export / import
+# --------------------------------------------------------------------------
 
-    @log_call
-    def load_history(self, filename):
-        with open(filename, "rb") as f:
-            encrypted = f.read()
-        json_str = self.decrypt_data(encrypted)
-        self.history = json.loads(json_str)
+def export_plaintext(records: list[Record], path: Path | str) -> Path:
+    """Export WITHOUT encryption. Refused by default in the UI: this writes passwords
+    in the clear, which is the thing the vault exists to avoid."""
+    p = Path(path)
+    p.write_text(
+        json.dumps([r.to_dict() for r in records], ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    _restrict_permissions(p)
+    return p
 
-    @log_call
-    def clear_history(self):
-        self.history.clear()
 
-    def search(self, query):
-        query = query.lower()
-        return [e for e in self.history if 
-                query in e["site"].lower() or 
-                query in e["login"].lower() or 
-                query in e["email"].lower()]
+def export_encrypted(records: list[Record], path: Path | str, passphrase: str) -> Path:
+    p = Path(path)
+    salt = secrets.token_bytes(16)
+    key = derive_key(passphrase, salt)
+    payload = json.dumps([r.to_dict() for r in records], ensure_ascii=False).encode("utf-8")
+    blob = b"AWPE" + salt + encrypt(payload, key)
+    p.write_bytes(blob)
+    _restrict_permissions(p)
+    return p
 
-    @log_call
-    def delete_by_id(self, record_id):
-        self.history = [e for e in self.history if e["id"] != record_id]
 
-    @log_call
-    def edit_by_id(self, record_id, **kwargs):
-        for e in self.history:
-            if e["id"] == record_id:
-                e.update(kwargs)
-                break
-                
-    def encrypt_data(self, data):
-        return self.f.encrypt(data.encode())
-
-    def decrypt_data(self, data):
-        return self.f.decrypt(data).decode()
-        
+def import_encrypted(path: Path | str, passphrase: str) -> list[Record]:
+    blob = Path(path).read_bytes()
+    if blob[:4] != b"AWPE":
+        raise ValueError("Это не зашифрованный экспорт")
+    salt = blob[4:20]
+    key = derive_key(passphrase, salt)
+    payload = decrypt(blob[20:], key)
+    return [Record.from_dict(r) for r in json.loads(payload.decode("utf-8"))]

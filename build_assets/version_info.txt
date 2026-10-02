@@ -1,12 +1,17 @@
 # -*- mode: python ; coding: utf-8 -*-
 # Version resource for the Windows build, referenced by gen_pass.spec.
 #
-# Written in the form PyInstaller's versioninfo parser accepts: it walks this file
-# as an AST and expects StringTable children to be 2-tuples (name, value). An
-# earlier version used StringStruct('Name', 'value') keyword calls, which the
-# reader rejects, and the build failed with "Failed to deserialize VSVersionInfo".
+# IMPORTANT: PyInstaller loads this file with eval(), not exec(). Two consequences,
+# both learned by reading PyInstaller/utils/win32/versioninfo.py:
 #
-# This mirrors the output of `pyi-makespec --grab-version`.
+#   1. The file must contain exactly ONE expression. A module docstring beside the
+#      VSVersionInfo(...) call is a second statement, which is a SyntaxError and
+#      surfaces as "Failed to deserialize VSVersionInfo".
+#   2. StringTable children must be StringStruct(name, value) CALLS, not 2-tuples.
+#      eval() produces plain tuples from tuples, and the builder then calls
+#      .toRaw() on them -> AttributeError.
+#
+# Comments are fine; eval() ignores them.
 
 VSVersionInfo(
     ffi=FixedFileInfo(
@@ -25,14 +30,14 @@ VSVersionInfo(
                 StringTable(
                     '040904B0',
                     [
-                        ('CompanyName', 'AWProger'),
-                        ('FileDescription', 'Генератор паролей'),
-                        ('FileVersion', '2.0.0'),
-                        ('InternalName', 'gen_pass'),
-                        ('LegalCopyright', 'MIT License, © 2026 AWProger'),
-                        ('OriginalFilename', 'Генератор паролей.exe'),
-                        ('ProductName', 'Генератор паролей'),
-                        ('ProductVersion', '2.0.0'),
+                        StringStruct('CompanyName', 'AWProger'),
+                        StringStruct('FileDescription', 'Генератор паролей'),
+                        StringStruct('FileVersion', '2.0.0'),
+                        StringStruct('InternalName', 'gen_pass'),
+                        StringStruct('LegalCopyright', 'MIT License, © 2026 AWProger'),
+                        StringStruct('OriginalFilename', 'Генератор паролей.exe'),
+                        StringStruct('ProductName', 'Генератор паролей'),
+                        StringStruct('ProductVersion', '2.0.0'),
                     ],
                 )
             ]

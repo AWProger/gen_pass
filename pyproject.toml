@@ -1,0 +1,80 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gen-pass"
+version = "2.0.0"
+description = "Оффлайн-генератор и менеджер паролей с шифрованным хранилищем"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "AWProger" }]
+keywords = ["password", "generator", "vault", "security", "offline", "ru"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Win32 (MS Windows)",
+    "Environment :: X11 Applications",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Natural Language :: Russian",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security :: Cryptography",
+    "Topic :: Utilities",
+]
+
+# Empty by design: everything used at runtime ships with Python itself.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+[project.urls]
+Homepage = "https://github.com/AWProger/gen_pass"
+Issues = "https://github.com/AWProger/gen_pass/issues"
+
+[project.gui-scripts]
+gen-pass = "main:main"
+
+[tool.setuptools]
+# Flat layout: the modules sit at the repo root, not inside a package.
+py-modules = ["core", "ui", "main"]
+include-package-data = false
+
+[tool.pytest.ini_options]
+testpaths = ["test_core.py"]
+addopts = "-q --tb=short"
+filterwarnings = ["error"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+# The code was written to be readable first; these are the rules that catch real
+# mistakes rather than style preferences.
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes - undefined names, unused imports
+    "W",    # warnings
+    "B",    # bugbear - mutable defaults, shadowing
+    "S",    # bandit - security
+    "C4",   # comprehensions
+    "RET",  # return consistency
+]
+ignore = [
+    "E501",    # line length is handled by the formatter
+    "S101",    # assert: used deliberately in tests
+    "B008",    # function call in default argument: tkinter idiom, rare here
+]
+
+[tool.ruff.lint.per-file-ignores]
+"test_core.py" = ["S105", "S106", "S107"]  # test fixtures contain fake secrets
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "parents"

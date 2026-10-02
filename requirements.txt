@@ -1,0 +1,8 @@
+# Runtime dependency.
+# A password generator needs CSPRNG and key derivation; both are in the standard
+# library (secrets, hashlib). So this list is deliberately short.
+#
+# cryptography was used for AES via Fernet. Replaced by hashlib.scrypt (stdlib)
+# plus a keyed stream from secrets - one less package to install or bundle.
+
+# No required third-party packages at runtime.

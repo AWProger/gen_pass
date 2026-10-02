@@ -1,0 +1,46 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+
+# --- tests / tooling caches ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# --- local data. Be SPECIFIC: a blanket *.json would block legitimate config ---
+*.pwdb
+vault/
+.env
+.env.*
+!.env.example
+
+# --- editors / OS ---
+.idea/
+.vscode/
+.venv/
+*.swp
+*.swo
+*~
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# --- the vault itself. Absolute rule: encrypted vaults never enter git ---
+# .awp  = vault, .salt = its key material, .awpe = encrypted export
+*.awp
+*.awpe
+*.salt
+.gen_pass/

@@ -1,0 +1,5 @@
+-r requirements.txt
+
+# Development only. Never installed by the user of the built .exe.
+pytest>=8.0
+ruff>=0.6

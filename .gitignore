@@ -1,16 +1,39 @@
-# Python
+# --- Python ---
 __pycache__/
-*.pyc
-*.pyo
-
-# PyInstaller
+*.py[cod]
+*$py.class
+*.so
+.Python
 build/
 dist/
-*.spec
-
-# Виртуальное окружение
+*.egg-info/
+.eggs/
+.venv/
 venv/
-.env
+env/
 
-# Сохранённые пароли — никогда не пушим в git
-*.json
+# --- tests / tooling caches ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# --- local data. Be SPECIFIC: a blanket *.json would block legitimate config ---
+*.pwdb
+vault/
+.env
+.env.*
+!.env.example
+
+# --- editors / OS ---
+.idea/
+.vscode/
+.venv/
+*.swp
+*.swo
+*~
+Thumbs.db
+desktop.ini
+.DS_Store

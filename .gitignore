@@ -37,3 +37,10 @@ vault/
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# --- the vault itself. Absolute rule: encrypted vaults never enter git ---
+# .awp  = vault, .salt = its key material, .awpe = encrypted export
+*.awp
+*.awpe
+*.salt
+.gen_pass/

@@ -383,14 +383,12 @@ class LockScreen(Screen):
         self.entry_confirm.configure(show=show)
 
     def choose_file(self) -> None:
-        chosen = filedialog.askopenfilename(
-            parent=self, title="Файл хранилища",
-            initialdir=str(self.path().parent),
+        # One dialog for both cases: pick an existing vault, or type a new name.
+        chosen = filedialog.asksaveasfilename(
+            parent=self, title="Выберите файл хранилища или введите новое имя",
+            initialdir=str(self.path().parent), initialfile=self.path().name,
+            defaultextension=".awp", confirmoverwrite=False,
             filetypes=[("Хранилище", "*.awp"), ("Все файлы", "*.*")],
-        ) or filedialog.asksaveasfilename(
-            parent=self, title="Или новое хранилище", defaultextension=".awp",
-            initialdir=str(self.path().parent), filetypes=[("Хранилище", "*.awp")],
-            confirmoverwrite=False,
         )
         if chosen:
             self.app.settings.vault_path = chosen

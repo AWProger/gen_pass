@@ -328,7 +328,7 @@ class LockScreen(Screen):
         self.entry_confirm.pack(fill="x", pady=(6, 0))
         self.entry_confirm.bind("<Return>", lambda _e: self.submit())
         ttk.Label(self.confirm_row, style="Muted.TLabel", wraplength=300, justify="left",
-                  text="Мастер-пароль нигде не хранится. Забудете — восстановить "
+                  text="Мастер-пароль нигде не хранится. Забудете - восстановить "
                        "пароли будет нельзя.").pack(anchor="w", pady=(6, 0))
 
         self.opts = ttk.Frame(inner)
@@ -630,7 +630,7 @@ class ListScreen(Screen):
                    command=self.delete_selected).pack(side="right")
 
         self.hint = ttk.Label(self.bottom, style="Muted.TLabel", justify="left",
-                              text="Enter — пароль · Ctrl+B — логин · Ctrl+T — 2FA")
+                              text="Enter - пароль · Ctrl+B - логин · Ctrl+T - 2FA")
 
     def card_button(self, parent, text: str, tip: str, command) -> ttk.Button:
         btn = ttk.Button(parent, text=text, style="CardIcon.TButton", width=2, command=command)
@@ -724,7 +724,7 @@ class ListScreen(Screen):
         self.card.pack(fill="x", pady=(8, 0))
         self.lbl_title.configure(text=("★ " if rec.favorite else "") + rec.title)
         self.lbl_folder.configure(text=rec.folder)
-        self.val_login.configure(text=_short(rec.login or rec.email or "—", 30))
+        self.val_login.configure(text=_short(rec.login or rec.email or "-", 30))
         self._show_password()
         if rec.totp:
             self.lbl_totp_name.grid(row=self.row_totp, column=0, sticky="w")
@@ -883,7 +883,7 @@ class EditScreen(Screen):
         gen = ttk.Button(pw, text="⚄", style="Icon.TButton", width=2, command=self.quick_generate)
         gen.pack(side="left")
         gen.bind("<Button-3>", lambda _e: self.app.show("generator", for_edit=True))
-        Tooltip(gen, "Сгенерировать · правый клик — настройки", self.theme)
+        Tooltip(gen, "Сгенерировать · правый клик - настройки", self.theme)
         self.entries["password"] = self.entry_password
 
         meter = ttk.Frame(form)
@@ -1141,8 +1141,8 @@ class GeneratorScreen(Screen):
         self._slider(f, "Длина", self.var_length, MIN_LENGTH, 64)
         grid = ttk.Frame(f)
         grid.pack(fill="x")
-        for i, (text, var) in enumerate((("a–z", self.var_lower), ("A–Z", self.var_upper),
-                                         ("0–9", self.var_digits), ("!#$%", self.var_symbols))):
+        for i, (text, var) in enumerate((("a-z", self.var_lower), ("A-Z", self.var_upper),
+                                         ("0-9", self.var_digits), ("!#$%", self.var_symbols))):
             grid.columnconfigure(i, weight=1, uniform="c")
             ttk.Checkbutton(grid, text=text, variable=var).grid(row=0, column=i, sticky="w")
         ttk.Checkbutton(f, text="Без похожих символов (I l 1 O 0)",
@@ -1228,7 +1228,7 @@ class GeneratorScreen(Screen):
             self.password = generate_from_settings(st)
         except ValueError as e:
             self.password = ""
-            self.lbl_out.configure(text="—")
+            self.lbl_out.configure(text="-")
             self.lbl_strength.configure(text=str(e), foreground=self.theme.c["danger"])
             self.bar.set(0)
             return
@@ -1294,7 +1294,7 @@ class SettingsScreen(Screen):
                         variable=self.var_minimize, command=self.apply).pack(anchor="w")
         ttk.Checkbutton(body, text="Резервная копия при каждом сохранении",
                         variable=self.var_backups, command=self.apply).pack(anchor="w", pady=(4, 0))
-        ttk.Label(body, text="0 — не блокировать / не очищать", style="Muted.TLabel").pack(
+        ttk.Label(body, text="0 - не блокировать / не очищать", style="Muted.TLabel").pack(
             anchor="w", pady=(4, 0))
 
         self.vault_widgets: list[ttk.Button] = []
@@ -1558,7 +1558,7 @@ class AuditScreen(Screen):
     name = "audit"
 
     KINDS = (
-        ("weak", "Слабые", "меньше 60 бит — подбираются перебором"),
+        ("weak", "Слабые", "меньше 60 бит - подбираются перебором"),
         ("reused", "Повторяются", "утечка на одном сайте откроет и другие"),
         ("old", "Старые", "не менялись больше года"),
         ("empty", "Пустые", "запись без пароля"),
@@ -1593,7 +1593,7 @@ class AuditScreen(Screen):
         sb.pack(side="right", fill="y")
         self.tree.bind("<Double-1>", lambda _e: self.open_selected())
         self.tree.bind("<Return>", lambda _e: self.open_selected())
-        ttk.Label(self, text="Двойной клик — открыть и сменить пароль",
+        ttk.Label(self, text="Двойной клик - открыть и сменить пароль",
                   style="Muted.TLabel").pack(anchor="w", pady=(6, 8))
 
     def on_show(self, **_kwargs) -> None:

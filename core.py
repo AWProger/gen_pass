@@ -191,9 +191,9 @@ def generate_password(
     if not isinstance(length, int):
         raise ValueError("Длина должна быть целым числом")
     if length < MIN_LENGTH:
-        raise ValueError(f"Минимальная длина — {MIN_LENGTH}")
+        raise ValueError(f"Минимальная длина - {MIN_LENGTH}")
     if length > MAX_LENGTH:
-        raise ValueError(f"Максимальная длина — {MAX_LENGTH}")
+        raise ValueError(f"Максимальная длина - {MAX_LENGTH}")
 
     pool = build_alphabet(
         lowercase=lowercase,
@@ -263,7 +263,7 @@ def passphrase_entropy(words: int = 5, *, syllables: int = 3, add_number: bool =
 
 def generate_pin(length: int = 6) -> str:
     if not 4 <= length <= 12:
-        raise ValueError("Длина PIN — от 4 до 12 цифр")
+        raise ValueError("Длина PIN - от 4 до 12 цифр")
     return "".join(secrets.choice(DIGITS) for _ in range(length))
 
 

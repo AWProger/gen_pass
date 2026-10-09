@@ -37,6 +37,7 @@ from core import (
     totp,
     totp_remaining,
     build_alphabet,
+    audit,
 )
 
 
@@ -579,3 +580,74 @@ def test_pin():
     assert len(pin) == 6 and pin.isdigit()
     with pytest.raises(ValueError):
         generate_pin(3)
+
+
+# --------------------------------------------------------------------------
+# Backups, master password change, audit
+# --------------------------------------------------------------------------
+
+def test_save_creates_backups_and_prunes(tmp_path):
+    v = Vault(tmp_path / "v.awp")
+    v.backup_limit = 3
+    v.create("passphrase-1")
+    for i in range(6):
+        v.add(f"p{i}", "s")
+        v.save()
+    backups = v.list_backups()
+    assert len(backups) == 3
+    assert all(b.with_suffix(".salt").exists() for b in backups)
+    # The newest backup is a complete, openable vault.
+    restored = Vault(backups[0])
+    restored.unlock("passphrase-1")
+    assert len(restored.all()) == 5
+
+
+def test_backups_can_be_disabled(tmp_path):
+    v = Vault(tmp_path / "v.awp")
+    v.backups = False
+    v.create("passphrase-1")
+    v.save()
+    assert v.list_backups() == []
+
+
+def test_change_passphrase(tmp_path):
+    v = Vault(tmp_path / "v.awp")
+    v.create("old-passphrase")
+    v.add("secret", "site")
+    v.save()
+    old_salt = (tmp_path / "v.salt").read_bytes()
+    with pytest.raises(ValueError):
+        v.change_passphrase("wrong", "new-passphrase")
+    v.change_passphrase("old-passphrase", "new-passphrase")
+    assert (tmp_path / "v.salt").read_bytes() != old_salt
+
+    fresh = Vault(tmp_path / "v.awp")
+    with pytest.raises(ValueError):
+        fresh.unlock("old-passphrase")
+    fresh.unlock("new-passphrase")
+    assert fresh.all()[0].password == "secret"
+    # A backup made under the old passphrase still opens with it.
+    Vault(fresh.list_backups()[0]).unlock("old-passphrase")
+
+
+def test_verify(tmp_path):
+    v = Vault(tmp_path / "v.awp")
+    assert not v.verify("anything")
+    v.create("passphrase-1")
+    assert v.verify("passphrase-1") and not v.verify("passphrase-2")
+
+
+def test_audit():
+    from datetime import datetime as dt
+    strong = generate_password(24)
+    recs = [
+        Record(id="1", password="abc12345", created="2026-01-01 00:00:00"),
+        Record(id="2", password=strong, created="2026-01-01 00:00:00"),
+        Record(id="3", password=strong, created="2020-01-01 00:00:00"),
+        Record(id="4", password=""),
+    ]
+    res = audit(recs, now=dt(2026, 6, 1))
+    assert [r.id for r in res["weak"]] == ["1"]
+    assert [r.id for r in res["reused"]] == ["2", "3"]
+    assert [r.id for r in res["old"]] == ["3"]
+    assert [r.id for r in res["empty"]] == ["4"]

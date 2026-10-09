@@ -451,6 +451,9 @@ class Vault:
         # Set by create() and unlock(). save() refuses to run without it, so a
         # half-initialised vault can never overwrite good data with garbage.
         self._key: bytes | None = None
+        # Keep copies of the previous versions next to the vault.
+        self.backups = True
+        self.backup_limit = 20
 
     # -- low level -------------------------------------------------------
 
@@ -538,7 +541,76 @@ class Vault:
         tmp = self.path.with_suffix(self.path.suffix + ".tmp")
         tmp.write_bytes(blob)
         _restrict_permissions(tmp)
+        if self.backups and self.path.exists():
+            self._backup()
         tmp.replace(self.path)
+
+    # -- backups ---------------------------------------------------------
+
+    @property
+    def backup_dir(self) -> Path:
+        return self.path.parent / "backups"
+
+    def _backup(self) -> None:
+        """Copy the current vault and its salt aside before it is replaced.
+
+        Best effort: a failed backup must never block saving the user's data.
+        """
+        try:
+            self.backup_dir.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+            target = self.backup_dir / f"{self.path.stem}-{stamp}{self.path.suffix}"
+            target.write_bytes(self.path.read_bytes())
+            _restrict_permissions(target)
+            salt = self.path.with_suffix(".salt")
+            if salt.exists():
+                target.with_suffix(".salt").write_bytes(salt.read_bytes())
+            self._prune_backups()
+        except OSError:
+            pass
+
+    def list_backups(self) -> list[Path]:
+        if not self.backup_dir.exists():
+            return []
+        return sorted(self.backup_dir.glob(f"{self.path.stem}-*{self.path.suffix}"),
+                      reverse=True)
+
+    def _prune_backups(self) -> None:
+        for old in self.list_backups()[self.backup_limit:]:
+            old.unlink(missing_ok=True)
+            old.with_suffix(".salt").unlink(missing_ok=True)
+
+    # -- master password -------------------------------------------------
+
+    def verify(self, passphrase: str) -> bool:
+        """True when passphrase opens this vault. Does not touch loaded records."""
+        if self._key is None:
+            return False
+        return hmac.compare_digest(derive_key(passphrase, self._salt), self._key)
+
+    def change_passphrase(self, old: str, new: str) -> None:
+        """Re-encrypt under a new passphrase and a fresh salt."""
+        if not self.verify(old):
+            raise ValueError("Текущий мастер-пароль неверен")
+        if not new:
+            raise ValueError("Пароль не может быть пустым")
+        if self.backups and self.path.exists():
+            self._backup()
+        salt = secrets.token_bytes(16)
+        key = derive_key(new, salt)
+        sidecar = self.path.with_suffix(".salt")
+        tmp_salt = sidecar.with_suffix(".salt.tmp")
+        tmp_salt.write_bytes(salt)
+        _restrict_permissions(tmp_salt)
+        backups, self.backups = self.backups, False
+        try:
+            # Salt first: if the vault write then fails, the backup taken above
+            # still holds the old vault together with the old salt.
+            tmp_salt.replace(sidecar)
+            self._salt, self._key = salt, key
+            self._write(key)
+        finally:
+            self.backups = backups
 
     # -- record operations ----------------------------------------------
 
@@ -599,6 +671,41 @@ class Vault:
 
     def clear(self) -> None:
         self.records.clear()
+
+
+# --------------------------------------------------------------------------
+# Security audit
+# --------------------------------------------------------------------------
+
+WEAK_BITS = 60
+OLD_DAYS = 365
+
+
+def audit(records: list[Record], *, now: datetime | None = None) -> dict[str, list[Record]]:
+    """Group records by problem: weak, reused, old, empty password."""
+    now = now or datetime.now()
+    by_password: dict[str, list[Record]] = {}
+    for r in records:
+        if r.password:
+            by_password.setdefault(r.password, []).append(r)
+
+    result: dict[str, list[Record]] = {"weak": [], "reused": [], "old": [], "empty": []}
+    for r in records:
+        if not r.password:
+            result["empty"].append(r)
+            continue
+        if estimate_entropy(r.password) < WEAK_BITS:
+            result["weak"].append(r)
+        if len(by_password[r.password]) > 1:
+            result["reused"].append(r)
+        stamp = r.updated or r.created
+        try:
+            age = now - datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            continue
+        if age.days > OLD_DAYS:
+            result["old"].append(r)
+    return result
 
 
 def _restrict_permissions(path: Path) -> None:

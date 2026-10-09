@@ -24,6 +24,7 @@ Rules carried over from the previous interface, because they protect the data:
 from __future__ import annotations
 
 import sys
+import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -89,6 +90,14 @@ class App:
         self._build_screens()
         self.show("lock")
 
+        self._last_activity = time.monotonic()
+        for event in ("<KeyPress>", "<ButtonPress>", "<Motion>"):
+            root.bind_all(event, self._touch, add="+")
+        root.bind("<Control-KeyPress>", self._on_ctrl_key)
+        root.bind("<Escape>", lambda _e: self.screens[self.current].on_escape())
+        root.bind("<Unmap>", self._on_unmap)
+        self._watch_idle()
+
     # -- screens ---------------------------------------------------------
 
     def _build_screens(self) -> None:
@@ -123,12 +132,47 @@ class App:
         self.save_settings()
         self.show("list")
 
-    def lock(self) -> None:
+    def lock(self, reason: str = "Хранилище заблокировано") -> None:
         if self.vault is None:
             return
         self.vault = None
+        # A password copied from the vault should not outlive the unlocked session.
+        if self._clipboard_text is not None:
+            self._clear_clipboard(force=True)
+        for dialog in self.root.winfo_children():
+            if isinstance(dialog, tk.Toplevel):
+                dialog.destroy()
         self.show("lock")
-        self.toast("Хранилище заблокировано")
+        self.toast(reason)
+
+    # -- activity, auto-lock, shortcuts ----------------------------------
+
+    def _touch(self, _event=None) -> None:
+        self._last_activity = time.monotonic()
+
+    def _watch_idle(self) -> None:
+        minutes = self.settings.auto_lock_minutes
+        if self.vault is not None and minutes > 0:
+            if time.monotonic() - self._last_activity > minutes * 60:
+                self.lock(f"Заблокировано после {minutes} мин без действий")
+        self.root.after(5000, self._watch_idle)
+
+    def _on_unmap(self, event: tk.Event) -> None:
+        if (event.widget is self.root and self.settings.lock_on_minimize
+                and self.root.state() == "iconic"):
+            self.lock()
+
+    def _on_ctrl_key(self, event: tk.Event) -> str | None:
+        key = latin_key(event)
+        if not key:
+            return None
+        if key == "l" and self.vault is not None:
+            self.lock()
+            return "break"
+        screen = self.screens.get(self.current)
+        if screen is not None and screen.shortcut(key, event):
+            return "break"
+        return None
 
     def save_vault(self) -> bool:
         """Persist the vault; report failure instead of losing the change silently."""
@@ -237,6 +281,13 @@ class Screen(ttk.Frame):
         pass
 
     def on_hide(self) -> None:
+        pass
+
+    def shortcut(self, key: str, event: tk.Event) -> bool:
+        """Handle Ctrl+key; return True when consumed."""
+        return False
+
+    def on_escape(self) -> None:
         pass
 
     def header(self, title: str, back: str | None = "list") -> ttk.Frame:
@@ -407,6 +458,7 @@ class ListScreen(Screen):
         self.search.bind("<Down>", lambda _e: self._focus_list())
         self.search.bind("<Return>", lambda _e: self._enter_from_search())
         self.search.bind("<Escape>", lambda _e: self.var_search.set(""))
+        self.search.bind("<Control-KeyPress>", self._search_ctrl)
         self.add_tool("＋", "Новая запись (Ctrl+N)", lambda: self.app.show("edit"))
         self.add_tool("⚄", "Генератор (Ctrl+G)", lambda: self.app.show("generator"))
         self.btn_pin = self.add_tool("▣", "Поверх всех окон", self.toggle_pin)
@@ -444,10 +496,87 @@ class ListScreen(Screen):
         self.tree.bind("<Double-1>", lambda _e: self.copy_password())
         self.tree.bind("<Return>", lambda _e: self.copy_password())
         self.tree.bind("<Key>", self._type_to_search)
+        self.tree.bind("<Delete>", lambda _e: self.delete_selected())
+        self.tree.bind("<Button-3>", self.context_menu)
+        self.tree.bind("<Button-2>", self.context_menu)  # macOS secondary click
 
         self.empty = ttk.Label(list_frame, style="CardMuted.TLabel", justify="center")
 
         self._build_card()
+
+    def shortcut(self, key: str, event: tk.Event) -> bool:
+        actions = {
+            "f": lambda: (self.search.focus_set(), self.search.select_range(0, "end")),
+            "n": lambda: self.app.show("edit"),
+            "g": lambda: self.app.show("generator"),
+            "e": self.edit_selected,
+            "b": self.copy_login,
+            "t": self.copy_totp,
+            "d": self.toggle_favorite,
+        }
+        # Ctrl+C in the list copies the password; in the search box it copies text.
+        if key == "c" and event.widget is self.tree:
+            self.copy_password()
+            return True
+        if key in actions:
+            actions[key]()
+            return True
+        return False
+
+    def _search_ctrl(self, event: tk.Event) -> str | None:
+        # Entry binds Ctrl+B/D/T to cursor editing; in the search box ours take priority.
+        if latin_key(event) in ("b", "d", "t", "e", "n", "g", "l"):
+            return self.app._on_ctrl_key(event)
+        return None
+
+    def context_menu(self, event: tk.Event) -> None:
+        row = self.tree.identify_row(event.y)
+        if not row:
+            return
+        self.tree.selection_set(row)
+        self.tree.focus(row)
+        self._on_select()
+        rec = self.selected
+        if rec is None:
+            return
+        menu = tk.Menu(self, tearoff=False)
+        menu.add_command(label="Копировать пароль", accelerator="Enter",
+                         command=self.copy_password)
+        menu.add_command(label="Копировать логин", accelerator="Ctrl+B", command=self.copy_login)
+        if rec.totp:
+            menu.add_command(label="Копировать код 2FA", accelerator="Ctrl+T",
+                             command=self.copy_totp)
+        if rec.url:
+            menu.add_command(label="Открыть сайт", command=self.open_url)
+        menu.add_separator()
+        menu.add_command(label="Убрать из избранного" if rec.favorite else "В избранное",
+                         accelerator="Ctrl+D", command=self.toggle_favorite)
+        menu.add_command(label="Изменить", accelerator="Ctrl+E", command=self.edit_selected)
+        menu.add_command(label="Создать копию", command=self.duplicate)
+        menu.add_separator()
+        menu.add_command(label="Удалить", accelerator="Del", command=self.delete_selected)
+        menu.tk_popup(event.x_root, event.y_root)
+
+    def toggle_favorite(self) -> None:
+        rec = self.selected
+        if rec is None or self.app.vault is None:
+            return
+        self.app.vault.edit(rec.id, favorite=not rec.favorite)
+        if self.app.save_vault():
+            self.refresh(select=rec.id)
+
+    def duplicate(self) -> None:
+        rec = self.selected
+        vault = self.app.vault
+        if rec is None or vault is None:
+            return
+        data = rec.to_dict()
+        for key in ("id", "created", "updated", "history"):
+            data.pop(key)
+        data["site"] = f"{rec.site} (копия)" if rec.site else rec.site
+        new = vault.add(**data)
+        if self.app.save_vault():
+            self.app.show("edit", record_id=new.id)
 
     def add_tool(self, text: str, tip: str, command) -> ttk.Button:
         btn = ttk.Button(self.toolbar, text=text, style="Icon.TButton", width=2,
@@ -783,7 +912,18 @@ class EditScreen(Screen):
     def bind_all_keys(self) -> None:
         for widget in (*self.entries.values(), self.folder_box):
             widget.bind("<Return>", lambda _e: self.save())
-            widget.bind("<Escape>", lambda _e: self.cancel())
+
+    def on_escape(self) -> None:
+        self.cancel()
+
+    def shortcut(self, key: str, event: tk.Event) -> bool:
+        if key == "s":
+            self.save()
+            return True
+        if key == "g":
+            self.quick_generate()
+            return True
+        return False
 
     def on_show(self, record_id: str | None = None, password: str | None = None,
                 keep: bool = False, **_kwargs) -> None:
@@ -1021,8 +1161,18 @@ class GeneratorScreen(Screen):
                   text="Только для карт, телефонов и замков: "
                        "как пароль от сайта PIN слабый.").pack(anchor="w", pady=(4, 0))
 
+    def shortcut(self, key: str, event: tk.Event) -> bool:
+        if key == "c" and not isinstance(event.widget, (ttk.Entry, ttk.Combobox)):
+            self.copy()
+            return True
+        if key in ("g", "r"):
+            self.generate()
+            return True
+        return False
+
     def on_show(self, back: str = "list", for_edit: bool = False, **_kwargs) -> None:
         self.back = back
+        self.after(30, self.focus_set)
         self.for_edit = for_edit
         if for_edit:
             self.btn_save.configure(text="✓ Вставить", state="normal")
@@ -1031,6 +1181,9 @@ class GeneratorScreen(Screen):
         else:
             self.btn_save.configure(text="В запись", state="disabled")
         self.on_mode(save=False)
+
+    def on_escape(self) -> None:
+        self.go_back()
 
     def go_back(self) -> None:
         if self.for_edit:
@@ -1197,6 +1350,12 @@ class SettingsScreen(Screen):
         state = "normal" if vault else "disabled"
         for btn in self.vault_widgets:
             btn.configure(state=state)
+
+    def on_hide(self) -> None:
+        self.apply()
+
+    def on_escape(self) -> None:
+        self.app.show("list" if self.app.vault else "lock")
 
     def apply(self) -> None:
         st = self.app.settings
@@ -1515,6 +1674,25 @@ def generate_from_settings(settings: Settings) -> str:
         exclude_ambiguous=settings.gen_exclude_ambiguous,
         full_symbols=settings.gen_full_symbols,
     )
+
+
+# Physical key positions, so Ctrl+F still works with the Russian layout active.
+_X11_KEYCODES = dict(zip(
+    (38, 56, 54, 40, 26, 41, 42, 43, 31, 44, 45, 46, 58, 57, 32, 33, 24, 27, 39, 28, 30, 55,
+     25, 53, 29, 52),
+    "abcdefghijklmnopqrstuvwxyz", strict=True))
+
+
+def latin_key(event: tk.Event) -> str:
+    """The Latin letter on the pressed key, whatever keyboard layout is active."""
+    keysym = event.keysym or ""
+    if len(keysym) == 1 and keysym.isascii() and keysym.isalpha():
+        return keysym.lower()
+    if sys.platform == "win32" and 65 <= event.keycode <= 90:
+        return chr(event.keycode).lower()  # Windows virtual-key codes are the letters
+    if sys.platform.startswith("linux"):
+        return _X11_KEYCODES.get(event.keycode, "")
+    return ""
 
 
 def _short(text: str, limit: int) -> str:

@@ -225,6 +225,47 @@ def generate_password(
     return "".join(chars)
 
 
+# Pronounceable words are built from consonant+vowel syllables. Easier to type
+# and remember than random characters; the entropy is still exact, because each
+# syllable is an independent uniform draw.
+_CONSONANTS = "bdfgkmnprstvz"
+_VOWELS = "aeiou"
+SYLLABLES = [c + v for c in _CONSONANTS for v in _VOWELS]
+PASSPHRASE_MIN_WORDS = 3
+PASSPHRASE_MAX_WORDS = 12
+
+
+def generate_passphrase(words: int = 5, *, syllables: int = 3, separator: str = "-",
+                        capitalize: bool = True, add_number: bool = True) -> str:
+    """Words like "Bakemo-Tupira-Sedola-Kivune-47"."""
+    if not PASSPHRASE_MIN_WORDS <= words <= PASSPHRASE_MAX_WORDS:
+        raise ValueError(f"Слов должно быть от {PASSPHRASE_MIN_WORDS} до {PASSPHRASE_MAX_WORDS}")
+    if not 2 <= syllables <= 5:
+        raise ValueError("Слогов в слове должно быть от 2 до 5")
+    parts = []
+    for _ in range(words):
+        word = "".join(secrets.choice(SYLLABLES) for _ in range(syllables))
+        parts.append(word.capitalize() if capitalize else word)
+    if add_number:
+        parts.append(str(secrets.randbelow(90) + 10))
+    return separator.join(parts)
+
+
+def passphrase_entropy(words: int = 5, *, syllables: int = 3, add_number: bool = True) -> float:
+    """Exact entropy of generate_passphrase() with these settings."""
+    import math
+    bits = words * syllables * math.log2(len(SYLLABLES))
+    if add_number:
+        bits += math.log2(90)
+    return bits
+
+
+def generate_pin(length: int = 6) -> str:
+    if not 4 <= length <= 12:
+        raise ValueError("Длина PIN — от 4 до 12 цифр")
+    return "".join(secrets.choice(DIGITS) for _ in range(length))
+
+
 def _filter(source: str, exclude_ambiguous: bool) -> str:
     if not exclude_ambiguous:
         return source

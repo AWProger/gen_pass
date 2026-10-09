@@ -31,6 +31,9 @@ from core import (
     import_encrypted,
     strength_label,
     normalize_totp_secret,
+    generate_passphrase,
+    generate_pin,
+    passphrase_entropy,
     totp,
     totp_remaining,
     build_alphabet,
@@ -542,3 +545,37 @@ def test_totp_rejects_garbage():
 def test_totp_remaining():
     assert totp_remaining(60) == 30
     assert totp_remaining(89) == 1
+
+
+# --------------------------------------------------------------------------
+# Passphrases and PINs
+# --------------------------------------------------------------------------
+
+def test_passphrase_shape():
+    phrase = generate_passphrase(5, separator="_")
+    parts = phrase.split("_")
+    assert len(parts) == 6 and parts[-1].isdigit()
+    assert all(p[0].isupper() and len(p) == 6 for p in parts[:-1])
+
+
+def test_passphrase_without_number_or_caps():
+    phrase = generate_passphrase(3, capitalize=False, add_number=False, separator=" ")
+    assert phrase == phrase.lower() and len(phrase.split()) == 3
+
+
+def test_passphrase_limits():
+    with pytest.raises(ValueError):
+        generate_passphrase(2)
+    with pytest.raises(ValueError):
+        generate_passphrase(4, syllables=1)
+
+
+def test_passphrase_default_is_strong():
+    assert passphrase_entropy() >= 80
+
+
+def test_pin():
+    pin = generate_pin(6)
+    assert len(pin) == 6 and pin.isdigit()
+    with pytest.raises(ValueError):
+        generate_pin(3)

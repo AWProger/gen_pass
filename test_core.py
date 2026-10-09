@@ -17,6 +17,7 @@ import pytest
 
 from core import (
     ALL_SYMBOLS,
+    HISTORY_LIMIT,
     SAFE_SYMBOLS,
     Record,
     Vault,
@@ -442,3 +443,59 @@ def test_key_is_not_regenerated_per_instance(tmp_path):
     assert len(b.all()) == 1
     assert len(c.all()) == 1
     assert b.all()[0].password == "data"
+
+# --------------------------------------------------------------------------
+# Extended records
+# --------------------------------------------------------------------------
+
+def test_old_records_load_with_defaults():
+    rec = Record.from_dict({"id": "x", "password": "p", "site": "s"})
+    assert rec.tags == [] and rec.favorite is False and rec.totp == "" and rec.history == []
+
+
+def test_tags_from_string_are_split():
+    rec = Record.from_dict({"id": "x", "password": "p", "tags": "work, mail ,"})
+    assert rec.tags == ["work", "mail"]
+
+
+def test_add_accepts_extra_fields(vault):
+    rec = vault.add("pw", "site", url="https://e.com", folder="Работа",
+                    tags=["a"], favorite=True)
+    assert rec.url == "https://e.com" and rec.folder == "Работа"
+    assert rec.favorite and rec.tags == ["a"] and rec.updated == rec.created
+
+
+def test_edit_keeps_password_history(vault):
+    rec = vault.add("old-password", "site")
+    vault.edit(rec.id, password="new-password")
+    assert rec.password == "new-password"
+    assert rec.history[0]["password"] == "old-password"
+
+
+def test_history_is_bounded(vault):
+    rec = vault.add("p0", "site")
+    for i in range(1, 30):
+        vault.edit(rec.id, password=f"p{i}")
+    assert len(rec.history) == HISTORY_LIMIT
+    assert rec.history[0]["password"] == "p28"
+
+
+def test_search_covers_note_url_folder_tags(vault):
+    vault.add("p", "a", note="секретная заметка")
+    vault.add("p", "b", url="https://bank.example")
+    vault.add("p", "c", folder="Финансы", tags=["important"])
+    assert len(vault.search("заметка")) == 1
+    assert len(vault.search("bank")) == 1
+    assert len(vault.search("финансы")) == 1
+    assert len(vault.search("IMPORT")) == 1
+
+
+def test_extended_fields_survive_save(tmp_path):
+    v = Vault(tmp_path / "v.awp")
+    v.create("passphrase-1")
+    v.add("p", "s", folder="F", tags=["t"], favorite=True, totp="JBSWY3DPEHPK3PXP")
+    v.save()
+    v2 = Vault(tmp_path / "v.awp")
+    v2.unlock("passphrase-1")
+    r = v2.all()[0]
+    assert (r.folder, r.tags, r.favorite, r.totp) == ("F", ["t"], True, "JBSWY3DPEHPK3PXP")

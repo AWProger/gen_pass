@@ -281,21 +281,52 @@ class Record:
     email: str = ""
     created: str = ""
     note: str = ""
+    url: str = ""
+    folder: str = ""
+    tags: list[str] = field(default_factory=list)
+    favorite: bool = False
+    updated: str = ""
+    # Base32 TOTP secret for the site's two-factor codes, empty when unused.
+    totp: str = ""
+    # Previous passwords, newest first: [{"password": ..., "changed": ...}].
+    history: list[dict[str, str]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Record":
+        # Every field has a default, so vaults written by older versions load
+        # unchanged and unknown keys from newer ones are ignored.
+        tags = data.get("tags", [])
+        if isinstance(tags, str):
+            tags = [t.strip() for t in tags.split(",") if t.strip()]
         return cls(
-            id=data.get("id", ""),
+            id=data.get("id", "") or str(uuid.uuid4()),
             password=data.get("password", ""),
             site=data.get("site", ""),
             login=data.get("login", ""),
             email=data.get("email", ""),
             created=data.get("created", ""),
             note=data.get("note", ""),
+            url=data.get("url", ""),
+            folder=data.get("folder", ""),
+            tags=list(tags),
+            favorite=bool(data.get("favorite", False)),
+            updated=data.get("updated", ""),
+            totp=data.get("totp", ""),
+            history=list(data.get("history", [])),
         )
+
+    @property
+    def title(self) -> str:
+        return self.site or self.url or self.login or "без названия"
+
+    def matches(self, query: str) -> bool:
+        q = query.lower()
+        haystack = (self.site, self.login, self.email, self.url, self.note,
+                    self.folder, *self.tags)
+        return any(q in h.lower() for h in haystack)
 
 
 # --------------------------------------------------------------------------
@@ -303,6 +334,15 @@ class Record:
 # --------------------------------------------------------------------------
 
 DEFAULT_DIR = Path.home() / ".gen_pass"
+
+# Fields beyond the original five that add() and edit() accept.
+EDITABLE_FIELDS = ("url", "folder", "tags", "favorite", "totp")
+# How many previous passwords a record remembers.
+HISTORY_LIMIT = 10
+
+
+def _now() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 class Vault:
@@ -414,16 +454,22 @@ class Vault:
 
     # -- record operations ----------------------------------------------
 
-    def add(self, password: str, site: str = "", login: str = "", email: str = "", note: str = "") -> Record:
+    def add(self, password: str, site: str = "", login: str = "", email: str = "",
+            note: str = "", **extra: Any) -> Record:
+        now = _now()
         rec = Record(
             id=str(uuid.uuid4()),
             password=password,
             site=site,
             login=login,
             email=email,
-            created=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            created=now,
             note=note,
+            updated=now,
         )
+        for key in EDITABLE_FIELDS:
+            if key in extra:
+                setattr(rec, key, extra[key])
         self.records.append(rec)
         return rec
 
@@ -439,20 +485,26 @@ class Vault:
         rec = self.get(record_id)
         if rec is None:
             return False
-        for key in ("password", "site", "login", "email", "note"):
-            if key in fields:
+        new_pwd = fields.get("password")
+        if new_pwd is not None and new_pwd != rec.password and rec.password:
+            rec.history.insert(0, {"password": rec.password, "changed": _now()})
+            del rec.history[HISTORY_LIMIT:]
+        changed = False
+        for key in ("password", "site", "login", "email", "note", *EDITABLE_FIELDS):
+            if key in fields and getattr(rec, key) != fields[key]:
                 setattr(rec, key, fields[key])
+                changed = True
+        if changed:
+            rec.updated = _now()
         return True
 
     def search(self, query: str) -> list[Record]:
         if not query:
             return []
-        q = query.lower()
-        return [
-            r
-            for r in self.records
-            if q in r.site.lower() or q in r.login.lower() or q in r.email.lower()
-        ]
+        return [r for r in self.records if r.matches(query)]
+
+    def folders(self) -> list[str]:
+        return sorted({r.folder for r in self.records if r.folder}, key=str.lower)
 
     def all(self) -> list[Record]:
         return list(self.records)

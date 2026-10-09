@@ -25,6 +25,7 @@ Design notes for the rework:
 from __future__ import annotations
 
 import base64
+import csv
 import hashlib
 import hmac
 import struct
@@ -666,6 +667,26 @@ class Vault:
     def folders(self) -> list[str]:
         return sorted({r.folder for r in self.records if r.folder}, key=str.lower)
 
+    def merge(self, records: list[Record]) -> tuple[int, int]:
+        """Add imported records, skipping exact duplicates. Returns (added, skipped)."""
+        seen = {(r.site, r.login, r.password) for r in self.records}
+        ids = {r.id for r in self.records}
+        added = skipped = 0
+        for rec in records:
+            key = (rec.site, rec.login, rec.password)
+            if key in seen:
+                skipped += 1
+                continue
+            if not rec.id or rec.id in ids:
+                rec.id = str(uuid.uuid4())
+            if not rec.created:
+                rec.created = _now()
+            self.records.append(rec)
+            seen.add(key)
+            ids.add(rec.id)
+            added += 1
+        return added, skipped
+
     def all(self) -> list[Record]:
         return list(self.records)
 
@@ -751,3 +772,70 @@ def import_encrypted(path: Path | str, passphrase: str) -> list[Record]:
     key = derive_key(passphrase, salt)
     payload = decrypt(blob[20:], key)
     return [Record.from_dict(r) for r in json.loads(payload.decode("utf-8"))]
+
+
+# Header names used by other password managers, lower-cased, mapped to our fields.
+# Covers Chrome/Edge, Firefox, Bitwarden, KeePass, KeePassXC, 1Password, LastPass.
+CSV_ALIASES = {
+    "site": ("name", "title", "account", "site"),
+    "url": ("url", "login_uri", "web site", "website", "origin"),
+    "login": ("username", "login_username", "login name", "login", "user"),
+    "password": ("password", "login_password"),
+    "note": ("note", "notes", "comments", "extra"),
+    "folder": ("folder", "group", "grouping"),
+    "totp": ("totp", "login_totp", "otpauth", "one-time password"),
+    "email": ("email", "e-mail"),
+    "favorite": ("favorite", "fav"),
+    "tags": ("tags",),
+}
+
+
+def import_csv(path: Path | str) -> list[Record]:
+    """Read a CSV exported by a browser or another password manager."""
+    import io
+    text = Path(path).read_text(encoding="utf-8-sig")
+    reader = csv.DictReader(io.StringIO(text, newline=""))
+    if not reader.fieldnames:
+        raise ValueError("Пустой CSV-файл")
+    headers = {h.strip().lower(): h for h in reader.fieldnames if h}
+    columns = {}
+    for target, aliases in CSV_ALIASES.items():
+        for alias in aliases:
+            if alias in headers:
+                columns[target] = headers[alias]
+                break
+    if "password" not in columns:
+        raise ValueError("В CSV нет столбца с паролем (password)")
+
+    records = []
+    for row in reader:
+        data = {k: (row.get(col) or "").strip() for k, col in columns.items()}
+        if not data.get("password") and not data.get("site") and not data.get("url"):
+            continue
+        if not data.get("site") and data.get("url"):
+            from urllib.parse import urlparse
+            data["site"] = urlparse(data["url"]).hostname or data["url"]
+        data["favorite"] = data.get("favorite", "").lower() in ("1", "true", "yes", "да")
+        data["tags"] = data.get("tags", "")
+        data["created"] = _now()
+        records.append(Record.from_dict(data))
+    return records
+
+
+CSV_FIELDS = ("site", "url", "login", "email", "password", "totp", "folder", "tags",
+              "favorite", "note", "created", "updated")
+
+
+def export_csv(records: list[Record], path: Path | str) -> Path:
+    """Export WITHOUT encryption, in a layout other managers can import."""
+    p = Path(path)
+    with p.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(CSV_FIELDS)
+        for r in records:
+            row = r.to_dict()
+            row["tags"] = ", ".join(r.tags)
+            row["favorite"] = "1" if r.favorite else ""
+            writer.writerow([row[k] for k in CSV_FIELDS])
+    _restrict_permissions(p)
+    return p

@@ -38,6 +38,8 @@ from core import (
     totp_remaining,
     build_alphabet,
     audit,
+    export_csv,
+    import_csv,
 )
 
 
@@ -651,3 +653,61 @@ def test_audit():
     assert [r.id for r in res["reused"]] == ["2", "3"]
     assert [r.id for r in res["old"]] == ["3"]
     assert [r.id for r in res["empty"]] == ["4"]
+
+
+# --------------------------------------------------------------------------
+# CSV
+# --------------------------------------------------------------------------
+
+def test_import_chrome_csv(tmp_path):
+    f = tmp_path / "chrome.csv"
+    f.write_text("name,url,username,password,note\n"
+                 "github.com,https://github.com/login,me,s3cret,hi\n", encoding="utf-8")
+    [r] = import_csv(f)
+    assert (r.site, r.url, r.login, r.password, r.note) == (
+        "github.com", "https://github.com/login", "me", "s3cret", "hi")
+
+
+def test_import_bitwarden_csv(tmp_path):
+    f = tmp_path / "bw.csv"
+    f.write_text("folder,favorite,type,name,notes,fields,reprompt,login_uri,"
+                 "login_username,login_password,login_totp\n"
+                 "Работа,1,login,Почта,,,0,https://mail.example,boss,pw,JBSWY3DPEHPK3PXP\n",
+                 encoding="utf-8")
+    [r] = import_csv(f)
+    assert r.folder == "Работа" and r.favorite and r.totp == "JBSWY3DPEHPK3PXP"
+    assert r.site == "Почта" and r.login == "boss"
+
+
+def test_import_firefox_csv_takes_site_from_url(tmp_path):
+    f = tmp_path / "ff.csv"
+    f.write_text('"url","username","password"\n"https://www.example.org","u","p"\n',
+                 encoding="utf-8")
+    [r] = import_csv(f)
+    assert r.site == "www.example.org"
+
+
+def test_import_csv_without_password_column(tmp_path):
+    f = tmp_path / "bad.csv"
+    f.write_text("a,b\n1,2\n", encoding="utf-8")
+    with pytest.raises(ValueError):
+        import_csv(f)
+
+
+def test_csv_roundtrip(tmp_path):
+    recs = [Record(id="1", password='p,"q"', site="s", login="l", tags=["a", "b"],
+                   favorite=True, folder="F", note="line1\nline2")]
+    export_csv(recs, tmp_path / "out.csv")
+    [r] = import_csv(tmp_path / "out.csv")
+    assert (r.password, r.site, r.tags, r.favorite, r.folder, r.note) == (
+        'p,"q"', "s", ["a", "b"], True, "F", "line1\nline2")
+
+
+def test_merge_skips_duplicates(vault):
+    vault.add("pw", "site", "me")
+    added, skipped = vault.merge([
+        Record(id="", password="pw", site="site", login="me"),
+        Record(id="", password="other", site="site", login="me"),
+    ])
+    assert (added, skipped) == (1, 1)
+    assert len(vault.all()) == 2 and all(r.id for r in vault.all())

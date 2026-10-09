@@ -695,6 +695,67 @@ class Vault:
 
 
 # --------------------------------------------------------------------------
+# Settings
+# --------------------------------------------------------------------------
+
+SETTINGS_PATH = DEFAULT_DIR / "settings.json"
+
+
+@dataclass
+class Settings:
+    """User preferences. Contains no secrets, so it is stored as plain JSON."""
+
+    vault_path: str = ""
+    theme: str = "dark"            # "dark" | "light"
+    always_on_top: bool = False
+    auto_lock_minutes: int = 5     # 0 disables
+    clipboard_seconds: int = 30
+    lock_on_minimize: bool = False
+    backups: bool = True
+    geometry: str = ""
+    # generator
+    gen_mode: str = "password"     # "password" | "passphrase" | "pin"
+    gen_length: int = DEFAULT_LENGTH
+    gen_lower: bool = True
+    gen_upper: bool = True
+    gen_digits: bool = True
+    gen_symbols: bool = True
+    gen_full_symbols: bool = False
+    gen_exclude_ambiguous: bool = False
+    gen_words: int = 5
+    gen_separator: str = "-"
+    gen_pin_length: int = 6
+
+    @classmethod
+    def load(cls, path: Path | str | None = None) -> "Settings":
+        """Never fails: a missing or broken file yields defaults."""
+        p = Path(path) if path else SETTINGS_PATH
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return cls()
+        if not isinstance(data, dict):
+            return cls()
+        defaults = cls()
+        kwargs = {}
+        for name, default in asdict(defaults).items():
+            value = data.get(name, default)
+            # Ignore values of the wrong type instead of crashing on them later.
+            kwargs[name] = value if type(value) is type(default) else default
+        return cls(**kwargs)
+
+    def save(self, path: Path | str | None = None) -> None:
+        p = Path(path) if path else SETTINGS_PATH
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(asdict(self), ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(p)
+
+    def vault_file(self) -> Path:
+        return Path(self.vault_path) if self.vault_path else DEFAULT_DIR / "vault.awp"
+
+
+# --------------------------------------------------------------------------
 # Security audit
 # --------------------------------------------------------------------------
 

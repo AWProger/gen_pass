@@ -19,6 +19,7 @@ from core import (
     HISTORY_LIMIT,
     SAFE_SYMBOLS,
     Record,
+    Settings,
     Vault,
     decrypt,
     derive_key,
@@ -711,3 +712,27 @@ def test_merge_skips_duplicates(vault):
     ])
     assert (added, skipped) == (1, 1)
     assert len(vault.all()) == 2 and all(r.id for r in vault.all())
+
+
+# --------------------------------------------------------------------------
+# Settings
+# --------------------------------------------------------------------------
+
+def test_settings_roundtrip(tmp_path):
+    s = Settings(theme="light", always_on_top=True, gen_length=32)
+    s.save(tmp_path / "s.json")
+    loaded = Settings.load(tmp_path / "s.json")
+    assert loaded == s
+
+
+def test_settings_missing_or_broken_file_gives_defaults(tmp_path):
+    assert Settings.load(tmp_path / "none.json") == Settings()
+    (tmp_path / "bad.json").write_text("{not json", encoding="utf-8")
+    assert Settings.load(tmp_path / "bad.json") == Settings()
+
+
+def test_settings_ignores_wrong_types_and_unknown_keys(tmp_path):
+    (tmp_path / "s.json").write_text(
+        json.dumps({"gen_length": "huge", "theme": "light", "future": 1}), encoding="utf-8")
+    s = Settings.load(tmp_path / "s.json")
+    assert s.gen_length == Settings().gen_length and s.theme == "light"

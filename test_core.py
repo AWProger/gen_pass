@@ -11,7 +11,6 @@ original or is easy to break in a rewrite:
 
 import json
 import string
-from pathlib import Path
 
 import pytest
 

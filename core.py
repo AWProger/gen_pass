@@ -96,7 +96,7 @@ def encrypt(plaintext: bytes, key: bytes) -> bytes:
     so tampering is detected rather than silently decrypted.
     """
     nonce = secrets.token_bytes(16)
-    cipher = bytes(a ^ b for a, b in zip(plaintext, _keystream(key, nonce, len(plaintext))))
+    cipher = bytes(a ^ b for a, b in zip(plaintext, _keystream(key, nonce, len(plaintext)), strict=True))
     mac_key = hashlib.blake2b(b"mac", key=key, digest_size=32).digest()
     tag = hashlib.blake2b(nonce + cipher, key=mac_key, digest_size=32).digest()
     return b"AWP1" + nonce + tag + cipher
@@ -122,7 +122,7 @@ def decrypt(blob: bytes, key: bytes) -> bytes:
     if not hmac.compare_digest(tag, expected):
         raise ValueError("Неверный пароль или файл был изменён")
 
-    return bytes(a ^ b for a, b in zip(cipher, _keystream(key, nonce, len(cipher))))
+    return bytes(a ^ b for a, b in zip(cipher, _keystream(key, nonce, len(cipher)), strict=True))
 
 
 # --------------------------------------------------------------------------
@@ -379,8 +379,7 @@ class Vault:
         return salt
 
     def _header(self, key: bytes) -> bytes:
-        marker = encrypt(b"gen_pass.vault.v1", key)
-        return marker
+        return encrypt(b"gen_pass.vault.v1", key)
 
     def _read_header(self, key: bytes) -> bool:
         if len(self.blob) < len(self.MAGIC) + 4:

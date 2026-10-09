@@ -32,11 +32,9 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from pathlib import Path
-from typing import Callable
 
 from core import (
     DEFAULT_DIR,
-    MAX_LENGTH,
     MIN_LENGTH,
     Record,
     Vault,
@@ -296,7 +294,6 @@ class App:
 
     def _sync_controls(self) -> None:
         """Disable symbol options that cannot apply, and warn when no class is on."""
-        sym_on = self.var_symbols.get()
         self.entry_master.config(show="•" if self.var_mask.get() else "")
 
         any_class = any((self.var_lower.get(), self.var_upper.get(),
@@ -686,4 +683,4 @@ def run_app() -> None:
         # No display, e.g. running over a bare SSH session with no X forwarding.
         print(f"Не удалось открыть окно: {e}", flush=True)
         print("Графическому интерфейсу нужен запущенный на ПК, не на сервере.", flush=True)
-        raise SystemExit(1)
+        raise SystemExit(1) from e

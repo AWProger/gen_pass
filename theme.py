@@ -139,10 +139,15 @@ class Theme:
               bordercolor=[("active", c["surface2"])])
         s.configure("IconOn.TButton", background=c["select"], foreground=c["fg"],
                     bordercolor=c["select"], padding=(6, 3), relief="flat", font=self.font_icon)
+        s.map("IconOn.TButton", background=[("active", c["select"])])
+        s.configure("Star.TButton", background=c["bg"], foreground=c["warn"],
+                    bordercolor=c["bg"], padding=(6, 3), relief="flat", font=self.font_icon)
         s.configure("CardIcon.TButton", background=c["surface"], foreground=c["fg"],
                     bordercolor=c["surface"], padding=(5, 1), relief="flat", font=self.font)
         s.map("CardIcon.TButton", background=[("active", c["surface2"])],
               bordercolor=[("active", c["surface2"])])
+        s.configure("CardIconOn.TButton", background=c["select"], foreground=c["fg"],
+                    bordercolor=c["select"], padding=(5, 1), relief="flat", font=self.font)
         s.configure("Link.TButton", background=c["bg"], foreground=c["accent"],
                     bordercolor=c["bg"], padding=(2, 0), relief="flat", font=self.font_small)
         s.map("Link.TButton", background=[("active", c["bg"])],
@@ -168,7 +173,8 @@ class Theme:
 
         check = {"background": c["bg"], "foreground": c["fg"], "indicatorbackground": c["surface"],
                  "indicatorforeground": c["fg"], "focuscolor": c["bg"]}
-        s.configure("TCheckbutton", **check)
+        s.configure("TCheckbutton", indicatorrelief="flat", indicatormargin=(0, 0, 6, 0),
+                    **check)
         s.map("TCheckbutton", background=[("active", c["bg"])],
               indicatorbackground=[("selected", c["accent"]), ("active", c["surface2"])],
               indicatorforeground=[("selected", c["accent_fg"])])
@@ -276,3 +282,30 @@ def enable_hidpi() -> None:
         ctypes.windll.shcore.SetProcessDpiAwareness(1)
     except (AttributeError, OSError):
         pass
+
+
+class Toggle(ttk.Button):
+    """Icon button bound to a BooleanVar: highlighted while the value is true."""
+
+    def __init__(self, master: tk.Misc, variable: tk.BooleanVar, text_on: str,
+                 text_off: str | None = None, command=None, card: bool = False, **kw) -> None:
+        self.var = variable
+        self.text_on, self.text_off = text_on, text_off or text_on
+        self.card = card
+        self.user_command = command
+        super().__init__(master, command=self._flip, width=kw.pop("width", 2), **kw)
+        variable.trace_add("write", lambda *_: self.sync())
+        self.sync()
+
+    def _flip(self) -> None:
+        self.var.set(not self.var.get())
+        if self.user_command:
+            self.user_command()
+
+    def sync(self) -> None:
+        on = self.var.get()
+        if self.card:
+            style = "CardIconOn.TButton" if on else "CardIcon.TButton"
+        else:
+            style = "IconOn.TButton" if on else "Icon.TButton"
+        self.configure(text=self.text_on if on else self.text_off, style=style)

@@ -1,686 +1,964 @@
 """
 ui.py - tkinter interface for the password vault.
 
-Design decisions worth stating, because they are deliberate departures from the
-original interface:
+One small window instead of a wall of buttons. It is meant to stay open all day
+in a corner of the screen, so everything is organised as screens that replace
+each other inside the same window:
 
-  * The vault is unlocked once at start and kept in memory. The original asked
-    for nothing and silently held every password in a plain list with no vault
-    file at all; this version refuses to save anything unless the user has
-    actually created or unlocked a vault.
+    lock      -> master password; creates the vault on first run
+    list      -> search, folders, favourites, a card with copy buttons and 2FA code
+    edit      -> one record
+    generator -> passwords, passphrases, PINs
+    audit     -> weak, reused and old passwords
+    settings  -> appearance, security, import/export, master password
 
-  * Every destructive action asks first. Clearing the history or deleting the
-    vault file is not undoable, and the original did both on a single click with
-    no confirmation.
+Rules carried over from the previous interface, because they protect the data:
 
-  * Generated passwords are shown but never written to the vault automatically.
-    Saving is an explicit action, because the original appended every generated
-    password to history silently - generate ten passwords while experimenting
-    and you have ten saved records.
-
-  * The vault password is entered into a masked field, never a plain Entry.
-
-  * Copy to clipboard is explicit, and the clipboard is cleared after a delay so
-    the password does not sit in it indefinitely.
-
-  * Errors go to messageboxes with the real message. The original swallowed
-    import failures behind a bare "Ошибка".
+  * Nothing is saved without an explicit action; generating does not save.
+  * Every irreversible action asks first.
+  * The clipboard is cleared after a delay - and only if it still holds what we
+    put there, so the user's own clipboard is never wiped.
+  * The vault locks itself after a period of inactivity.
 """
 
 from __future__ import annotations
 
+import sys
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
 from pathlib import Path
+from tkinter import filedialog, messagebox, ttk
 
 from core import (
-    DEFAULT_DIR,
+    MAX_LENGTH,
     MIN_LENGTH,
     Record,
+    Settings,
     Vault,
-    __version__,
     estimate_entropy,
-    export_encrypted,
-    export_plaintext,
+    generate_passphrase,
     generate_password,
+    generate_pin,
+    normalize_totp_secret,
     strength_label,
+    totp,
+    totp_remaining,
 )
+from theme import PlaceholderEntry, StrengthBar, Theme, Toggle, enable_hidpi
 
 APP_TITLE = "Генератор паролей"
-CLIPBOARD_TTL_MS = 30_000  # clear the clipboard after this long
+DEFAULT_GEOMETRY = "380x580"
+MASK = "•" * 10
 
 
 class App:
-    def __init__(self, root: tk.Tk) -> None:
+    def __init__(self, root: tk.Tk, settings: Settings | None = None,
+                 settings_path: Path | None = None) -> None:
         self.root = root
-        self.root.title(f"{APP_TITLE} {__version__}")
-        self.root.geometry("720x640")
-        self.root.minsize(640, 600)
-        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
-
+        self.settings_path = settings_path
+        self.settings = settings or Settings.load(settings_path)
         self.vault: Vault | None = None
         self._clipboard_job: str | None = None
-        # Set only when the user overrides the default vault location.
-        self._path_override: Path | None = None
+        self._clipboard_text: str | None = None
+        self._toast_job: str | None = None
 
-        self._build_styles()
-        self._build_vars()
-        self._build_widgets()
-        self._refresh_history()
-        self._sync_controls()
+        root.title(APP_TITLE)
+        root.geometry(self.settings.geometry or DEFAULT_GEOMETRY)
+        root.minsize(340, 460)
+        root.protocol("WM_DELETE_WINDOW", self.on_close)
+        root.attributes("-topmost", self.settings.always_on_top)
+        self._set_icon()
 
-    # ------------------------------------------------------------------
-    # construction
-    # ------------------------------------------------------------------
+        self.theme = Theme(root, self.settings.theme)
+        # Status first, so a crowded screen squeezes its own content, not the status.
+        self.status = ttk.Label(root, style="Muted.TLabel", anchor="w", padding=(12, 3, 12, 6))
+        self.status.pack(fill="x", side="bottom")
+        self.body = ttk.Frame(root)
+        self.body.pack(fill="both", expand=True)
 
-    def _build_styles(self) -> None:
-        style = ttk.Style(self.root)
+        self.screens: dict[str, Screen] = {}
+        self.current = ""
+        self._build_screens()
+        self.show("lock")
+
+    # -- screens ---------------------------------------------------------
+
+    def _build_screens(self) -> None:
+        for screen in self.screens.values():
+            screen.destroy()
+        self.screens = {cls.name: cls(self.body, self) for cls in SCREENS}
+
+    def show(self, name: str, **kwargs) -> None:
+        if self.current in self.screens:
+            self.screens[self.current].pack_forget()
+            self.screens[self.current].on_hide()
+        self.current = name
+        screen = self.screens[name]
+        screen.pack(fill="both", expand=True)
+        screen.on_show(**kwargs)
+
+    def set_theme(self, name: str) -> None:
+        self.settings.theme = name
+        self.save_settings()
+        self.theme.apply(name)
+        current = self.current
+        self.current = ""
+        self._build_screens()
+        self.show(current)
+
+    # -- vault lifecycle -------------------------------------------------
+
+    def opened(self, vault: Vault) -> None:
+        vault.backups = self.settings.backups
+        self.vault = vault
+        self.settings.vault_path = str(vault.path)
+        self.save_settings()
+        self.show("list")
+
+    def lock(self) -> None:
+        if self.vault is None:
+            return
+        self.vault = None
+        self.show("lock")
+        self.toast("Хранилище заблокировано")
+
+    def save_vault(self) -> bool:
+        """Persist the vault; report failure instead of losing the change silently."""
+        if self.vault is None:
+            return False
         try:
-            style.theme_use("clam")
-        except tk.TclError:
-            pass  # theme unavailable, default is fine
+            self.vault.save()
+        except OSError as e:
+            messagebox.showerror(APP_TITLE, f"Не удалось сохранить: {e}", parent=self.root)
+            return False
+        return True
 
-        style.configure("Title.TLabel", font=("Segoe UI", 15, "bold"))
-        style.configure("Hint.TLabel", foreground="#666")
-        style.configure("Result.TEntry", font=("Consolas", 14))
-        style.configure("Strong.TLabel", foreground="#1a7f37", font=("Segoe UI", 10, "bold"))
-        style.configure("Medium.TLabel", foreground="#9a6700", font=("Segoe UI", 10, "bold"))
-        style.configure("Weak.TLabel", foreground="#cf222e", font=("Segoe UI", 10, "bold"))
-
-    def _build_vars(self) -> None:
-        self.var_length = tk.IntVar(value=20)
-        self.var_lower = tk.BooleanVar(value=True)
-        self.var_upper = tk.BooleanVar(value=True)
-        self.var_digits = tk.BooleanVar(value=True)
-        self.var_symbols = tk.BooleanVar(value=True)
-        self.var_full_symbols = tk.BooleanVar(value=False)
-        self.var_exclude_ambiguous = tk.BooleanVar(value=False)
-
-        self.var_site = tk.StringVar()
-        self.var_login = tk.StringVar()
-        self.var_email = tk.StringVar()
-        self.var_note = tk.StringVar()
-
-        self.var_password = tk.StringVar()
-        self.var_strength = tk.StringVar(value="—")
-        self.var_entropy = tk.StringVar()
-        self.var_status = tk.StringVar(value="Хранилище не открыто")
-        self.var_search = tk.StringVar()
-        self.var_mask = tk.BooleanVar(value=True)
-        self.var_master = tk.StringVar()
-
-    def _build_widgets(self) -> None:
-        pad = {"padx": 10, "pady": 6}
-
-        outer = ttk.Frame(self.root, padding=12)
-        outer.pack(fill="both", expand=True)
-
-        ttk.Label(outer, text=APP_TITLE, style="Title.TLabel").pack(anchor="w")
-        ttk.Label(
-            outer,
-            text="Пароли генерируются локально и никуда не отправляются",
-            style="Hint.TLabel",
-        ).pack(anchor="w", pady=(0, 10))
-
-        self._build_generator(outer, pad)
-        self._build_credentials(outer, pad)
-        self._build_vault_bar(outer, pad)
-        self._build_history(outer, pad)
-        self._build_status(outer, pad)
-
-    def _build_generator(self, parent, pad) -> None:
-        box = ttk.LabelFrame(parent, text="Генерация", padding=10)
-        box.pack(fill="x", pady=pad["pady"])
-        box.columnconfigure(1, weight=1)
-
-        ttk.Label(box, text="Длина").grid(row=0, column=0, sticky="w")
-        self.scale = ttk.Scale(
-            box,
-            from_=MIN_LENGTH,
-            to=64,
-            orient="horizontal",
-            variable=self.var_length,
-            command=self._on_length_change,
-        )
-        self.scale.grid(row=0, column=1, sticky="ew", padx=8)
-        self.lbl_length = ttk.Label(box, text=str(self.var_length.get()), width=4)
-        self.lbl_length.grid(row=0, column=2)
-
-        checks = ttk.Frame(box)
-        checks.grid(row=1, column=0, columnspan=3, sticky="w", pady=(8, 0))
-        ttk.Checkbutton(checks, text="a-z", variable=self.var_lower,
-                        command=self._sync_controls).pack(side="left")
-        ttk.Checkbutton(checks, text="A-Z", variable=self.var_upper,
-                        command=self._sync_controls).pack(side="left", padx=6)
-        ttk.Checkbutton(checks, text="0-9", variable=self.var_digits,
-                        command=self._sync_controls).pack(side="left")
-        ttk.Checkbutton(checks, text="Символы", variable=self.var_symbols,
-                        command=self._sync_controls).pack(side="left", padx=6)
-        ttk.Checkbutton(checks, text="Убрать похожие (I l 1 O 0)",
-                        variable=self.var_exclude_ambiguous,
-                        command=self._sync_controls).pack(side="left", padx=6)
-
-        ttk.Checkbutton(box, text="Полный набор символов (включая кавычки и \\)",
-                        variable=self.var_full_symbols,
-                        command=self._sync_controls).grid(
-            row=2, column=0, columnspan=3, sticky="w", pady=(6, 0))
-
-        out = ttk.Frame(box)
-        out.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(10, 0))
-        out.columnconfigure(0, weight=1)
-
-        self.entry_result = ttk.Entry(out, textvariable=self.var_password,
-                                      font=("Consolas", 14))
-        self.entry_result.grid(row=0, column=0, sticky="ew")
-
-        ttk.Button(out, text="Сгенерировать", command=self.on_generate).grid(
-            row=0, column=1, padx=(8, 0))
-        ttk.Button(out, text="Копировать", command=self.on_copy).grid(
-            row=0, column=2, padx=(4, 0))
-
-        info = ttk.Frame(box)
-        info.grid(row=4, column=0, columnspan=3, sticky="w", pady=(8, 0))
-        self.lbl_strength = ttk.Label(info, textvariable=self.var_strength)
-        self.lbl_strength.pack(side="left")
-        ttk.Label(info, textvariable=self.var_entropy, style="Hint.TLabel").pack(
-            side="left", padx=10)
-
-    def _build_credentials(self, parent, pad) -> None:
-        box = ttk.LabelFrame(parent, text="Данные записи", padding=10)
-        box.pack(fill="x", pady=pad["pady"])
-        box.columnconfigure(1, weight=1)
-
-        rows = [("Сайт", self.var_site), ("Логин", self.var_login),
-                ("E-mail", self.var_email), ("Заметка", self.var_note)]
-        for i, (label, var) in enumerate(rows):
-            ttk.Label(box, text=label).grid(row=i, column=0, sticky="w", pady=3)
-            entry = ttk.Entry(box, textvariable=var)
-            entry.grid(row=i, column=1, sticky="ew", padx=8, pady=3)
-            if label == "Заметка":
-                entry.grid(row=i, column=0, columnspan=2, sticky="ew", padx=8, pady=3)
-            self._mask_entries = getattr(self, "_mask_entries", {})
-            self._mask_entries[label] = entry
-
-        ttk.Button(box, text="Сохранить в хранилище", command=self.on_save).grid(
-            row=len(rows), column=0, columnspan=2, sticky="w", pady=(8, 0))
-
-    def _build_vault_bar(self, parent, pad) -> None:
-        box = ttk.LabelFrame(parent, text="Хранилище", padding=10)
-        box.pack(fill="x", pady=pad["pady"])
-
-        self.lbl_path = ttk.Label(box, text=f"Файл: {DEFAULT_DIR / 'vault.awp'}",
-                                  style="Hint.TLabel")
-        self.lbl_path.pack(anchor="w")
-
-        row = ttk.Frame(box)
-        row.pack(fill="x", pady=(8, 0))
-
-        ttk.Label(row, text="Мастер-пароль").pack(side="left")
-        self.entry_master = ttk.Entry(row, textvariable=self.var_master,
-                                      show="•", width=22)
-        self.entry_master.pack(side="left", padx=8)
-        ttk.Checkbutton(row, text="Показать", variable=self.var_mask,
-                        command=self._toggle_master).pack(side="left")
-
-        buttons = ttk.Frame(box)
-        buttons.pack(fill="x", pady=(8, 0))
-        ttk.Button(buttons, text="Создать", command=self.on_create).pack(side="left")
-        ttk.Button(buttons, text="Открыть", command=self.on_unlock).pack(side="left", padx=6)
-        ttk.Button(buttons, text="Заблокировать", command=self.on_lock).pack(side="left")
-        ttk.Button(buttons, text="Сменить путь", command=self.on_change_path).pack(side="left", padx=6)
-
-        row2 = ttk.Frame(box)
-        row2.pack(fill="x", pady=(6, 0))
-        ttk.Button(row2, text="Экспорт (зашифрованный)",
-                   command=lambda: self.on_export(encrypted=True)).pack(side="left")
-        ttk.Button(row2, text="Экспорт (открытый)",
-                   command=lambda: self.on_export(encrypted=False)).pack(side="left", padx=6)
-        ttk.Button(row2, text="Импорт", command=self.on_import).pack(side="left")
-        ttk.Button(row2, text="Удалить файл", command=self.on_delete_vault).pack(side="left", padx=6)
-
-    def _build_history(self, parent, pad) -> None:
-        box = ttk.LabelFrame(parent, text="История", padding=10)
-        box.pack(fill="both", expand=True, pady=pad["pady"])
-        box.columnconfigure(0, weight=1)
-        box.rowconfigure(1, weight=1)
-
-        top = ttk.Frame(box)
-        top.grid(row=0, column=0, sticky="ew")
-        ttk.Label(top, text="Поиск").pack(side="left")
-        self.entry_search = ttk.Entry(top, textvariable=self.var_search, width=30)
-        self.entry_search.pack(side="left", padx=6)
-        self.entry_search.bind("<Return>", lambda _e: self._refresh_history())
-        self.entry_search.bind("<KeyRelease>", lambda _e: self._refresh_history())
-        ttk.Button(top, text="Найти", command=self._refresh_history).pack(side="left")
-        ttk.Button(top, text="Очистить поиск", command=self._clear_search).pack(side="left", padx=6)
-        ttk.Button(top, text="Удалить выбранное", command=self.on_delete_record).pack(side="left")
-
-        cols = ("site", "login", "email", "created", "strength", "id")
-        self.tree = ttk.Treeview(box, columns=cols, show="headings", selectmode="browse")
-        headings = {
-            "site": ("Сайт", 150), "login": ("Логин", 130), "email": ("E-mail", 150),
-            "created": ("Создан", 130), "strength": ("Стойкость", 100), "id": ("ID", 0),
-        }
-        for col, (text, width) in headings.items():
-            self.tree.heading(col, text=text)
-            self.tree.column(col, width=width, stretch=(col in ("site", "login", "email")))
-        self.tree.column("id", width=0, stretch=False)
-        self.tree.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
-        self.tree.bind("<Delete>", lambda _e: self.on_delete_record())
-
-        sb = ttk.Scrollbar(box, orient="vertical", command=self.tree.yview)
-        sb.grid(row=1, column=1, sticky="ns")
-        self.tree.configure(yscrollcommand=sb.set)
-
-        btns = ttk.Frame(box)
-        btns.grid(row=2, column=0, sticky="w", pady=(8, 0))
-        ttk.Button(btns, text="Показать пароль", command=self.on_reveal).pack(side="left")
-        ttk.Button(btns, text="Копировать пароль", command=self.on_copy_selected).pack(side="left", padx=6)
-        ttk.Button(btns, text="Очистить историю", command=self.on_clear_history).pack(side="left")
-        ttk.Label(btns, text="  ↑↓ выбрать, Delete — удалить",
-                  style="Hint.TLabel").pack(side="left", padx=10)
-
-    def _build_status(self, parent, pad) -> None:
-        ttk.Label(parent, textvariable=self.var_status, style="Hint.TLabel").pack(
-            anchor="w", pady=(4, 0))
-
-    # ------------------------------------------------------------------
-    # helpers
-    # ------------------------------------------------------------------
-
-    def _on_length_change(self, _value) -> None:
-        self.var_length.set(int(float(_value)))
-        self.lbl_length.config(text=str(self.var_length.get()))
-
-    def _sync_controls(self) -> None:
-        """Disable symbol options that cannot apply, and warn when no class is on."""
-        self.entry_master.config(show="•" if self.var_mask.get() else "")
-
-        any_class = any((self.var_lower.get(), self.var_upper.get(),
-                         self.var_digits.get(), self.var_symbols.get()))
-        if not any_class:
-            self.var_status.set("Выберите хотя бы один набор символов")
-
-    def _toggle_master(self) -> None:
-        self._sync_controls()
-
-    def _require_vault(self) -> Vault | None:
-        if self.vault is None:
-            messagebox.showinfo(
-                APP_TITLE,
-                "Сначала откройте хранилище: «Создать» для нового или «Открыть» для существующего.",
-            )
-            return None
-        return self.vault
-
-    def _refresh_history(self) -> None:
-        for item in self.tree.get_children():
-            self.tree.delete(item)
-
-        if self.vault is None:
-            self.var_status.set("Хранилище не открыто")
-            return
-
-        records = self.vault.search(self.var_search.get()) if self.var_search.get() \
-            else self.vault.all()
-
-        for rec in records:
-            bits = estimate_entropy(rec.password)
-            self.tree.insert(
-                "", "end",
-                values=(rec.site, rec.login, rec.email, rec.created,
-                        strength_label(bits), rec.id),
-            )
-        self.var_status.set(f"Записей: {len(records)}   файл: {self.vault.path}")
-
-    def _clear_search(self) -> None:
-        self.var_search.set("")
-        self._refresh_history()
-
-    def _selected(self) -> Record | None:
-        sel = self.tree.selection()
-        if not sel:
-            messagebox.showinfo(APP_TITLE, "Сначала выберите запись в таблице.")
-            return None
-        if self.vault is None:
-            return None
-        return self.vault.get(self.tree.item(sel[0], "values")[-1])
-
-    # ------------------------------------------------------------------
-    # actions
-    # ------------------------------------------------------------------
-
-    def on_generate(self) -> None:
+    def save_settings(self) -> None:
         try:
-            pwd = generate_password(
-                self.var_length.get(),
-                lowercase=self.var_lower.get(),
-                uppercase=self.var_upper.get(),
-                digits=self.var_digits.get(),
-                symbols=self.var_symbols.get(),
-                exclude_ambiguous=self.var_exclude_ambiguous.get(),
-                full_symbols=self.var_full_symbols.get(),
-            )
-        except ValueError as e:
-            messagebox.showerror(APP_TITLE, str(e))
+            self.settings.save(self.settings_path)
+        except OSError:
+            pass  # preferences are a convenience; never block the user over them
+
+    # -- feedback --------------------------------------------------------
+
+    def toast(self, message: str, kind: str = "") -> None:
+        style = {"error": "Danger.TLabel", "ok": "Ok.TLabel"}.get(kind, "Muted.TLabel")
+        self.status.configure(text=message, style=style)
+        if self._toast_job:
+            self.root.after_cancel(self._toast_job)
+        self._toast_job = self.root.after(4000, lambda: self.status.configure(text=""))
+
+    def copy(self, text: str, what: str = "Пароль") -> None:
+        if not text:
+            self.toast(f"{what}: пусто", "error")
             return
-
-        self.var_password.set(pwd)
-        bits = estimate_entropy(pwd)
-        self.var_entropy.set(f"{bits:.0f} бит энтропии")
-        label = strength_label(bits)
-        self.var_strength.set(label)
-        style = {"Очень слабый": "Weak", "Слабый": "Weak",
-                 "Средний": "Medium", "Сильный": "Strong", "Очень сильный": "Strong"}[label]
-        self.lbl_strength.config(style=f"{style}.TLabel")
-
-    def on_copy(self) -> None:
-        pwd = self.var_password.get()
-        if not pwd:
-            messagebox.showinfo(APP_TITLE, "Сначала сгенерируйте пароль.")
-            return
-        self._copy_with_ttl(pwd)
-
-    def _copy_with_ttl(self, text: str) -> None:
         self.root.clipboard_clear()
         self.root.clipboard_append(text)
-        self.root.update()
-
+        self._clipboard_text = text
+        seconds = self.settings.clipboard_seconds
         if self._clipboard_job:
             self.root.after_cancel(self._clipboard_job)
-        self._clipboard_job = self.root.after(
-            CLIPBOARD_TTL_MS, lambda: (self.root.clipboard_clear(),
-                                       self.var_status.set("Буфер обмена очищен")),
-        )
-        self.var_status.set("Скопировано. Буфер будет очищен через 30 секунд.")
+            self._clipboard_job = None
+        if seconds > 0:
+            self._clipboard_job = self.root.after(seconds * 1000, self._clear_clipboard)
+            self.toast(f"{what} скопирован · очистка через {seconds} с", "ok")
+        else:
+            self.toast(f"{what} скопирован", "ok")
 
-    def on_save(self) -> None:
-        vault = self._require_vault()
-        if vault is None:
-            return
-        pwd = self.var_password.get()
-        if not pwd:
-            messagebox.showinfo(APP_TITLE, "Сначала сгенерируйте пароль.")
-            return
+    def _clear_clipboard(self, force: bool = False) -> None:
+        self._clipboard_job = None
         try:
-            rec = vault.add(pwd, self.var_site.get().strip(),
-                            self.var_login.get().strip(),
-                            self.var_email.get().strip(),
-                            self.var_note.get().strip())
-            vault.save()
-        except OSError as e:
-            messagebox.showerror(APP_TITLE, f"Не удалось сохранить: {e}")
-            return
+            current = self.root.clipboard_get()
+        except tk.TclError:
+            current = None
+        # Do not wipe something the user copied after us.
+        if force or current == self._clipboard_text:
+            try:
+                self.root.clipboard_clear()
+            except tk.TclError:
+                pass
+            if not force:
+                self.toast("Буфер обмена очищен")
+        self._clipboard_text = None
 
-        self.var_status.set(f"Сохранено: {rec.site or 'без названия'}")
-        for var in (self.var_site, self.var_login, self.var_email, self.var_note):
-            var.set("")
-        self._refresh_history()
+    # -- window ----------------------------------------------------------
 
-    def on_create(self) -> None:
-        master = self.var_master.get()
-        if not master:
-            messagebox.showwarning(APP_TITLE, "Введите мастер-пароль.")
-            return
-        if master != master.strip():
-            messagebox.showwarning(
-                APP_TITLE,
-                "Пароль содержит пробелы в начале или конце.\n"
-                "Уберите их — иначе при открытии придётся вводить точно так же.")
-            return
-        if len(master) < 8:
-            messagebox.showwarning(
-                APP_TITLE,
-                "Мастер-пароль короче 8 символов. Он защищает всё хранилище целиком — "
-                "выберите что-то надёжнее.")
-            return
+    def set_topmost(self, on: bool) -> None:
+        self.settings.always_on_top = on
+        self.root.attributes("-topmost", on)
+        self.save_settings()
 
-        try:
-            self.vault = Vault(self._current_path())
-            self.vault.create(master)
-        except FileExistsError as e:
-            messagebox.showwarning(APP_TITLE, str(e))
-            return
-        except (OSError, ValueError) as e:
-            messagebox.showerror(APP_TITLE, f"Не удалось создать: {e}")
-            return
-
-        self._update_path_label()
-        self._refresh_history()
-        self.var_status.set("Хранилище создано")
-
-    def on_unlock(self) -> None:
-        master = self.var_master.get()
-        if not master:
-            messagebox.showwarning(APP_TITLE, "Введите мастер-пароль.")
-            return
-
-        vault = Vault(self._current_path())
-        if not vault.exists():
-            messagebox.showinfo(APP_TITLE, "Файл хранилища не найден. Создайте новый.")
-            return
-        try:
-            vault.unlock(master)
-        except (ValueError, FileNotFoundError) as e:
-            messagebox.showerror(APP_TITLE, f"Не удалось открыть: {e}")
-            return
-
-        self.vault = vault
-        self._update_path_label()
-        self._refresh_history()
-        self.var_status.set("Хранилище открыто")
-
-    def on_lock(self) -> None:
-        if self.vault is None:
-            return
-        self.vault = None
-        self.var_master.set("")
-        self._clear_search()
-        self._refresh_history()
-        self.var_status.set("Хранилище заблокировано")
-
-    def on_change_path(self) -> None:
-        chosen = filedialog.asksaveasfilename(
-            title="Куда сохранять хранилище",
-            defaultextension=".awp",
-            initialdir=str(self._current_path().parent),
-            initialfile=self._current_path().name,
-        )
-        if not chosen:
-            return
-        self._path_override = Path(chosen)
-        self._update_path_label()
-        if self.vault is not None:
-            self.vault.path = self._path_override
-            self._refresh_history()
-
-    def _current_path(self) -> Path:
-        return getattr(self, "_path_override", None) or (DEFAULT_DIR / "vault.awp")
-
-    def _update_path_label(self) -> None:
-        self.lbl_path.config(text=f"Файл: {self._current_path()}")
-
-    def on_export(self, encrypted: bool) -> None:
-        vault = self._require_vault()
-        if vault is None:
-            return
-        if not vault.all():
-            messagebox.showinfo(APP_TITLE, "Нечего экспортировать: хранилище пусто.")
-            return
-
-        kind = "зашифрованный" if encrypted else "открытый"
-        chosen = filedialog.asksaveasfilename(
-            title=f"Экспорт ({kind})",
-            defaultextension=".awpe" if encrypted else ".json",
-            filetypes=[("Файл", "*.*")],
-        )
-        if not chosen:
-            return
-
-        try:
-            if encrypted:
-                master = self.var_master.get()
-                if not master:
-                    messagebox.showwarning(
-                        APP_TITLE,
-                        "Для зашифрованного экспорта нужен мастер-пароль.")
-                    return
-                export_encrypted(vault.all(), chosen, master)
-            else:
-                if not messagebox.askyesno(
-                    APP_TITLE,
-                    "Открытый экспорт записывает пароли обычным текстом.\n\n"
-                    "Любой, кто прочитает файл, увидит все пароли.\n\n"
-                    "Продолжить?",
-                ):
-                    return
-                export_plaintext(vault.all(), chosen)
-        except (OSError, ValueError) as e:
-            messagebox.showerror(APP_TITLE, f"Ошибка экспорта: {e}")
-            return
-
-        self.var_status.set(f"Экспортировано: {chosen}")
-
-    def on_import(self) -> None:
-        chosen = filedialog.askopenfilename(
-            title="Импорт из зашифрованного экспорта", filetypes=[("Файл", "*.*")]
-        )
-        if not chosen:
-            return
-        master = self.var_master.get()
-        if not master:
-            messagebox.showwarning(APP_TITLE, "Введите мастер-пароль от файла.")
-            return
-
-        try:
-            from core import import_encrypted
-            records = import_encrypted(chosen, master)
-        except (ValueError, OSError) as e:
-            messagebox.showerror(APP_TITLE, f"Импорт не удался: {e}")
-            return
-
-        vault = self._require_vault()
-        if vault is None:
-            messagebox.showinfo(
-                APP_TITLE,
-                f"Прочитано записей: {len(records)}.\n"
-                "Откройте хранилище, чтобы импортировать в него.")
-            return
-
-        if not messagebox.askyesno(
-            APP_TITLE,
-            f"Импортировать {len(records)} записей в текущее хранилище?\n"
-            "Существующие записи останутся.",
-        ):
-            return
-
-        for rec in records:
-            vault.records.append(rec)
-        try:
-            vault.save()
-        except OSError as e:
-            messagebox.showerror(APP_TITLE, f"Не удалось сохранить: {e}")
-            return
-
-        self._refresh_history()
-        self.var_status.set(f"Импортировано записей: {len(records)}")
-
-    def on_delete_vault(self) -> None:
-        vault = self._require_vault()
-        if vault is None:
-            return
-        if not messagebox.askyesno(
-            APP_TITLE,
-            f"Удалить файл хранилища?\n\n{vault.path}\n\n"
-            "Все пароли будут потеряны безвозвратно.",
-        ):
-            return
-        try:
-            vault.path.unlink(missing_ok=True)
-            salt = vault.path.with_suffix(".salt")
-            salt.unlink(missing_ok=True)
-        except OSError as e:
-            messagebox.showerror(APP_TITLE, f"Не удалось удалить: {e}")
-            return
-
-        self.vault = None
-        self._refresh_history()
-        self.var_status.set("Файл хранилища удалён")
-
-    def on_reveal(self) -> None:
-        rec = self._selected()
-        if rec is None:
-            return
-        messagebox.showinfo(APP_TITLE, f"Пароль:\n\n{rec.password}")
-
-    def on_copy_selected(self) -> None:
-        rec = self._selected()
-        if rec is None:
-            return
-        self._copy_with_ttl(rec.password)
-
-    def on_delete_record(self) -> None:
-        rec = self._selected()
-        if rec is None:
-            return
-        if not messagebox.askyesno(
-            APP_TITLE, f"Удалить запись для «{rec.site or 'без названия'}»?"
-        ):
-            return
-
-        vault = self.vault
-        vault.delete(rec.id)
-        try:
-            vault.save()
-        except OSError as e:
-            messagebox.showerror(APP_TITLE, f"Не удалось сохранить: {e}")
-            return
-        self._refresh_history()
-        self.var_status.set("Запись удалена")
-
-    def on_clear_history(self) -> None:
-        vault = self._require_vault()
-        if vault is None:
-            return
-        if not vault.all():
-            messagebox.showinfo(APP_TITLE, "Хранилище и так пустое.")
-            return
-        if not messagebox.askyesno(
-            APP_TITLE,
-            f"Удалить все {len(vault.all())} записей?\n\n"
-            "Отменить это будет нельзя.",
-        ):
-            return
-
-        vault.clear()
-        try:
-            vault.save()
-        except OSError as e:
-            messagebox.showerror(APP_TITLE, f"Не удалось сохранить: {e}")
-            return
-        self._refresh_history()
-        self.var_status.set("История очищена")
+    def _set_icon(self) -> None:
+        base = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
+        icon = base / "build_assets" / "icon.png"
+        if icon.exists():
+            try:
+                self._icon = tk.PhotoImage(file=str(icon))
+                self.root.iconphoto(True, self._icon)
+            except tk.TclError:
+                pass
 
     def on_close(self) -> None:
         if self._clipboard_job:
-            try:
-                self.root.after_cancel(self._clipboard_job)
-            except tk.TclError:
-                pass
-        try:
-            self.root.clipboard_clear()
-        except tk.TclError:
-            pass
+            self.root.after_cancel(self._clipboard_job)
+        if self._clipboard_text is not None:
+            self._clear_clipboard(force=True)
+        if self.root.state() == "normal":
+            self.settings.geometry = self.root.geometry()
+        self.save_settings()
         self.root.destroy()
 
 
+# ----------------------------------------------------------------------
+# Screens
+# ----------------------------------------------------------------------
+
+class Screen(ttk.Frame):
+    name = ""
+
+    def __init__(self, master: tk.Misc, app: App) -> None:
+        super().__init__(master, padding=(12, 10, 12, 0))
+        self.app = app
+        self.theme = app.theme
+        self.build()
+
+    def build(self) -> None:
+        raise NotImplementedError
+
+    def on_show(self, **kwargs) -> None:
+        pass
+
+    def on_hide(self) -> None:
+        pass
+
+    def header(self, title: str, back: str | None = "list") -> ttk.Frame:
+        bar = ttk.Frame(self)
+        bar.pack(fill="x", pady=(0, 8))
+        if back:
+            ttk.Button(bar, text="←", style="Icon.TButton", width=2,
+                       command=lambda: self.app.show(back)).pack(side="left")
+        ttk.Label(bar, text=title, style="Title.TLabel").pack(side="left", padx=(4, 0))
+        return bar
+
+
+class LockScreen(Screen):
+    name = "lock"
+
+    def build(self) -> None:
+        self.var_master = tk.StringVar()
+        self.var_confirm = tk.StringVar()
+        self.var_show = tk.BooleanVar(value=False)
+
+        center = ttk.Frame(self)
+        center.place(relx=0.5, rely=0.42, anchor="center", relwidth=1.0)
+        inner = ttk.Frame(center, padding=(16, 0))
+        inner.pack(fill="x")
+
+        ttk.Label(inner, text="●●●", foreground=self.theme.c["accent"],
+                  font=(self.theme.font[0], 20, "bold")).pack()
+        ttk.Label(inner, text=APP_TITLE, style="Title.TLabel").pack(pady=(4, 0))
+        self.lbl_sub = ttk.Label(inner, style="Muted.TLabel", justify="center")
+        self.lbl_sub.pack(pady=(2, 16))
+
+        self.entry = ttk.Entry(inner, textvariable=self.var_master, show="•")
+        self.entry.pack(fill="x")
+        self.entry.bind("<Return>", lambda _e: self.submit())
+        self.confirm_row = ttk.Frame(inner)
+        self.entry_confirm = ttk.Entry(self.confirm_row, textvariable=self.var_confirm, show="•")
+        self.entry_confirm.pack(fill="x", pady=(6, 0))
+        self.entry_confirm.bind("<Return>", lambda _e: self.submit())
+        ttk.Label(self.confirm_row, style="Muted.TLabel", wraplength=300, justify="left",
+                  text="Мастер-пароль нигде не хранится. Забудете — восстановить "
+                       "пароли будет нельзя.").pack(anchor="w", pady=(6, 0))
+
+        self.opts = ttk.Frame(inner)
+        self.opts.pack(fill="x", pady=(6, 0))
+        ttk.Checkbutton(self.opts, text="Показать", variable=self.var_show,
+                        command=self._toggle_show).pack(side="left")
+
+        self.lbl_error = ttk.Label(inner, style="Danger.TLabel", wraplength=320)
+        self.lbl_error.pack(fill="x", pady=(6, 0))
+        self.btn = ttk.Button(inner, style="Accent.TButton", command=self.submit)
+        self.btn.pack(fill="x", pady=(4, 0))
+
+        bottom = ttk.Frame(self)
+        bottom.pack(side="bottom", fill="x", pady=(0, 4))
+        self.lbl_path = ttk.Label(bottom, style="Muted.TLabel", anchor="center")
+        self.lbl_path.pack(fill="x")
+        links = ttk.Frame(bottom)
+        links.pack()
+        ttk.Button(links, text="Другой файл…", style="Link.TButton",
+                   command=self.choose_file).pack(side="left")
+
+    def path(self) -> Path:
+        return self.app.settings.vault_file()
+
+    def on_show(self, **_kwargs) -> None:
+        self.var_master.set("")
+        self.var_confirm.set("")
+        self.lbl_error.configure(text="")
+        self.creating = not self.path().exists()
+        if self.creating:
+            self.lbl_sub.configure(text="Придумайте мастер-пароль\nдля нового хранилища")
+            self.confirm_row.pack(fill="x", after=self.entry)
+            self.btn.configure(text="Создать хранилище")
+        else:
+            self.lbl_sub.configure(text="Введите мастер-пароль")
+            self.confirm_row.pack_forget()
+            self.btn.configure(text="Открыть")
+        self._show_path()
+        self.after(50, self.entry.focus_set)
+
+    def _show_path(self) -> None:
+        text = str(self.path())
+        if len(text) > 48:
+            text = "…" + text[-47:]
+        self.lbl_path.configure(text=text)
+
+    def _toggle_show(self) -> None:
+        show = "" if self.var_show.get() else "•"
+        self.entry.configure(show=show)
+        self.entry_confirm.configure(show=show)
+
+    def choose_file(self) -> None:
+        chosen = filedialog.askopenfilename(
+            parent=self, title="Файл хранилища",
+            initialdir=str(self.path().parent),
+            filetypes=[("Хранилище", "*.awp"), ("Все файлы", "*.*")],
+        ) or filedialog.asksaveasfilename(
+            parent=self, title="Или новое хранилище", defaultextension=".awp",
+            initialdir=str(self.path().parent), filetypes=[("Хранилище", "*.awp")],
+            confirmoverwrite=False,
+        )
+        if chosen:
+            self.app.settings.vault_path = chosen
+            self.app.save_settings()
+            self.on_show()
+
+    def submit(self) -> None:
+        master = self.var_master.get()
+        if not master:
+            self.lbl_error.configure(text="Введите мастер-пароль")
+            return
+        if self.creating:
+            error = self._check_new(master)
+            if error:
+                self.lbl_error.configure(text=error)
+                return
+        self.lbl_error.configure(text="")
+        self.app.root.configure(cursor="watch")
+        self.update_idletasks()
+        try:
+            vault = Vault(self.path())
+            if self.creating:
+                vault.create(master)
+            else:
+                vault.unlock(master)
+        except (ValueError, OSError) as e:
+            self.lbl_error.configure(text=str(e))
+            self.var_master.set("")
+            return
+        finally:
+            self.app.root.configure(cursor="")
+        self.var_master.set("")
+        self.var_confirm.set("")
+        self.app.opened(vault)
+        self.app.toast("Хранилище создано" if self.creating else "Хранилище открыто", "ok")
+
+    def _check_new(self, master: str) -> str:
+        if master != master.strip():
+            return "Уберите пробелы в начале или в конце"
+        if len(master) < 8:
+            return "Слишком коротко: нужно хотя бы 8 символов"
+        if master != self.var_confirm.get():
+            return "Пароли не совпадают"
+        return ""
+
+
+class ListScreen(Screen):
+    name = "list"
+
+    def build(self) -> None:
+        self.var_search = tk.StringVar()
+        self.var_folder = tk.StringVar(value="Все папки")
+        self.var_fav = tk.BooleanVar(value=False)
+        self.revealed = False
+        self.selected: Record | None = None
+        self._tick_job: str | None = None
+
+        top = ttk.Frame(self)
+        top.pack(fill="x")
+        self.search = PlaceholderEntry(top, self.theme, "Поиск  (Ctrl+F)", self.var_search)
+        self.search.pack(side="left", fill="x", expand=True)
+        self.var_search.trace_add("write", lambda *_: self.refresh())
+        self.search.bind("<Down>", lambda _e: self._focus_list())
+        self.search.bind("<Return>", lambda _e: self._enter_from_search())
+        self.search.bind("<Escape>", lambda _e: self.var_search.set(""))
+        self.toolbar = ttk.Frame(top)
+        self.toolbar.pack(side="right", padx=(6, 0))
+        self.add_tool("＋", "Новая запись (Ctrl+N)", lambda: self.app.show("edit"))
+        self.btn_pin = self.add_tool("▣", "Поверх всех окон", self.toggle_pin)
+        self.add_tool("⏻", "Заблокировать (Ctrl+L)", self.app.lock)
+        self._sync_pin()
+
+        filt = ttk.Frame(self)
+        filt.pack(fill="x", pady=(8, 6))
+        fav = Toggle(filt, self.var_fav, "★", "☆", command=self.refresh)
+        fav.pack(side="left")
+        Tooltip(fav, "Только избранное", self.theme)
+        self.folder_box = ttk.Combobox(filt, textvariable=self.var_folder, state="readonly",
+                                       width=16)
+        self.folder_box.pack(side="left", padx=(4, 0))
+        self.folder_box.bind("<<ComboboxSelected>>", lambda _e: self.refresh())
+        self.lbl_count = ttk.Label(filt, style="Muted.TLabel")
+        self.lbl_count.pack(side="right")
+
+        # Packed before the list so the card keeps its height and the list shrinks.
+        self.bottom = ttk.Frame(self)
+        self.bottom.pack(side="bottom", fill="x")
+        list_frame = ttk.Frame(self, style="Card.TFrame")
+        list_frame.pack(fill="both", expand=True)
+        self.tree = ttk.Treeview(list_frame, columns=("title", "login"), show="",
+                                 selectmode="browse", height=4)
+        self.tree.column("title", width=170, stretch=True)
+        self.tree.column("login", width=130, stretch=True)
+        self.tree.tag_configure("muted", foreground=self.theme.c["muted"])
+        sb = ttk.Scrollbar(list_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=sb.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+        self.tree.bind("<<TreeviewSelect>>", lambda _e: self._on_select())
+        self.tree.bind("<Double-1>", lambda _e: self.copy_password())
+        self.tree.bind("<Return>", lambda _e: self.copy_password())
+        self.tree.bind("<Key>", self._type_to_search)
+
+        self.empty = ttk.Label(list_frame, style="CardMuted.TLabel", justify="center")
+
+        self._build_card()
+
+    def add_tool(self, text: str, tip: str, command) -> ttk.Button:
+        btn = ttk.Button(self.toolbar, text=text, style="Icon.TButton", width=2,
+                         command=command)
+        btn.pack(side="left", padx=(2, 0))
+        Tooltip(btn, tip, self.theme)
+        return btn
+
+    def _build_card(self) -> None:
+        card = self.card = ttk.Frame(self.bottom, style="Card.TFrame", padding=(10, 8))
+        card.columnconfigure(1, weight=1)
+        head = ttk.Frame(card, style="Card.TFrame")
+        head.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 4))
+        self.lbl_title = ttk.Label(head, style="Card.TLabel", font=self.theme.font_bold)
+        self.lbl_title.pack(side="left")
+        self.lbl_folder = ttk.Label(head, style="CardMuted.TLabel")
+        self.lbl_folder.pack(side="left", padx=(6, 0))
+
+        def row(r: int, label: str) -> tuple[ttk.Label, ttk.Frame]:
+            ttk.Label(card, text=label, style="CardMuted.TLabel").grid(
+                row=r, column=0, sticky="w", padx=(0, 8))
+            value = ttk.Label(card, style="Card.TLabel")
+            value.grid(row=r, column=1, sticky="w")
+            btns = ttk.Frame(card, style="Card.TFrame")
+            btns.grid(row=r, column=2, sticky="e")
+            return value, btns
+
+        self.val_login, b = row(1, "Логин")
+        self.card_button(b, "❐", "Копировать логин (Ctrl+B)", self.copy_login)
+        self.val_password, b = row(2, "Пароль")
+        self.val_password.configure(style="Mono.TLabel", font=self.theme.mono_small)
+        self.btn_reveal = self.card_button(b, "◉", "Показать / скрыть", self.toggle_reveal)
+        self.card_button(b, "❐", "Копировать пароль (Enter)", self.copy_password)
+        self.row_totp = 3
+        self.lbl_totp_name = ttk.Label(card, text="2FA", style="CardMuted.TLabel")
+        self.val_totp = ttk.Label(card, style="Mono.TLabel")
+        self.totp_btns = ttk.Frame(card, style="Card.TFrame")
+        self.lbl_totp_left = ttk.Label(self.totp_btns, style="CardMuted.TLabel", width=4,
+                                       anchor="e")
+        self.lbl_totp_left.pack(side="left")
+        self.card_button(self.totp_btns, "❐", "Копировать код 2FA (Ctrl+T)", self.copy_totp)
+
+        actions = ttk.Frame(card, style="Card.TFrame")
+        actions.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+        ttk.Button(actions, text="✎ Изменить", command=self.edit_selected).pack(side="left")
+        self.btn_open = ttk.Button(actions, text="↗ Сайт", command=self.open_url)
+        self.btn_open.pack(side="left", padx=(6, 0))
+        ttk.Button(actions, text="✕", style="Danger.TButton", width=3,
+                   command=self.delete_selected).pack(side="right")
+
+        self.hint = ttk.Label(self.bottom, style="Muted.TLabel", justify="left",
+                              text="Enter — пароль · Ctrl+B — логин · Ctrl+T — 2FA")
+
+    def card_button(self, parent, text: str, tip: str, command) -> ttk.Button:
+        btn = ttk.Button(parent, text=text, style="CardIcon.TButton", width=2, command=command)
+        btn.pack(side="left")
+        Tooltip(btn, tip, self.theme)
+        return btn
+
+    # -- data ------------------------------------------------------------
+
+    def on_show(self, select: str | None = None, **_kwargs) -> None:
+        self._sync_pin()
+        self.refresh(select=select)
+        self.after(30, self.search.focus_set)
+        self._tick()
+
+    def on_hide(self) -> None:
+        if self._tick_job:
+            self.after_cancel(self._tick_job)
+            self._tick_job = None
+
+    def records(self) -> list[Record]:
+        vault = self.app.vault
+        if vault is None:
+            return []
+        query = self.var_search.get().strip()
+        recs = vault.search(query) if query else vault.all()
+        if self.var_fav.get():
+            recs = [r for r in recs if r.favorite]
+        folder = self.var_folder.get()
+        if folder not in ("", "Все папки"):
+            recs = [r for r in recs if (r.folder or "Без папки") == folder]
+        return sorted(recs, key=lambda r: (not r.favorite, r.title.lower()))
+
+    def refresh(self, select: str | None = None) -> None:
+        vault = self.app.vault
+        if vault is None:
+            return
+        folders = vault.folders()
+        values = ["Все папки", *folders]
+        if any(not r.folder for r in vault.all()) and folders:
+            values.append("Без папки")
+        self.folder_box.configure(values=values)
+        if self.var_folder.get() not in values:
+            self.var_folder.set("Все папки")
+
+        keep = select or (self.selected.id if self.selected else None)
+        self.tree.delete(*self.tree.get_children())
+        recs = self.records()
+        for r in recs:
+            title = ("★ " if r.favorite else "") + r.title
+            self.tree.insert("", "end", iid=r.id, values=(title, r.login or r.email))
+        total = len(vault.all())
+        self.lbl_count.configure(text=f"{len(recs)} из {total}" if len(recs) != total
+                                 else f"{total}")
+
+        if not recs:
+            text = ("Ничего не найдено" if total else
+                    "Хранилище пустое\n\nНажмите ＋ или Ctrl+N,\nчтобы добавить первую запись")
+            self.empty.configure(text=text)
+            self.empty.place(relx=0.5, rely=0.45, anchor="center")
+        else:
+            self.empty.place_forget()
+
+        if keep and self.tree.exists(keep):
+            self.tree.selection_set(keep)
+            self.tree.see(keep)
+        elif recs and self.var_search.get():
+            self.tree.selection_set(recs[0].id)
+        else:
+            self.tree.selection_set(())
+        self._on_select()
+
+    def _on_select(self) -> None:
+        sel = self.tree.selection()
+        rec = self.app.vault.get(sel[0]) if sel and self.app.vault else None
+        if rec is not self.selected:
+            self.revealed = False
+        self.selected = rec
+        if rec is None:
+            self.card.pack_forget()
+            self.hint.pack(fill="x", pady=(8, 0))
+            return
+        self.hint.pack_forget()
+        self.card.pack(fill="x", pady=(8, 0))
+        self.lbl_title.configure(text=("★ " if rec.favorite else "") + rec.title)
+        self.lbl_folder.configure(text=rec.folder)
+        self.val_login.configure(text=_short(rec.login or rec.email or "—", 30))
+        self._show_password()
+        if rec.totp:
+            self.lbl_totp_name.grid(row=self.row_totp, column=0, sticky="w")
+            self.val_totp.grid(row=self.row_totp, column=1, sticky="w")
+            self.totp_btns.grid(row=self.row_totp, column=2, sticky="e")
+        else:
+            for w in (self.lbl_totp_name, self.val_totp, self.totp_btns):
+                w.grid_remove()
+        self.btn_open.configure(state="normal" if rec.url else "disabled")
+        self._update_totp()
+
+    def _show_password(self) -> None:
+        rec = self.selected
+        if rec is None:
+            return
+        text = _short(rec.password, 28) if self.revealed else MASK
+        self.val_password.configure(text=text)
+
+    def _update_totp(self) -> None:
+        rec = self.selected
+        if rec is None or not rec.totp:
+            return
+        try:
+            code = totp(rec.totp)
+        except ValueError:
+            self.val_totp.configure(text="ошибка секрета")
+            self.lbl_totp_left.configure(text="")
+            return
+        left = totp_remaining()
+        self.val_totp.configure(text=f"{code[:3]} {code[3:]}",
+                                foreground=self.theme.c["warn"] if left <= 5
+                                else self.theme.c["fg"])
+        self.lbl_totp_left.configure(text=f"{left}с")
+
+    def _tick(self) -> None:
+        self._update_totp()
+        self._tick_job = self.after(1000, self._tick)
+
+    # -- actions ---------------------------------------------------------
+
+    def copy_password(self) -> None:
+        if self.selected:
+            self.app.copy(self.selected.password, "Пароль")
+
+    def copy_login(self) -> None:
+        if self.selected:
+            self.app.copy(self.selected.login or self.selected.email, "Логин")
+
+    def copy_totp(self) -> None:
+        rec = self.selected
+        if rec and rec.totp:
+            try:
+                self.app.copy(totp(rec.totp), "Код 2FA")
+            except ValueError as e:
+                self.app.toast(str(e), "error")
+
+    def toggle_reveal(self) -> None:
+        self.revealed = not self.revealed
+        self._show_password()
+
+    def open_url(self) -> None:
+        rec = self.selected
+        if rec and rec.url:
+            import webbrowser
+            url = rec.url if "://" in rec.url else "https://" + rec.url
+            webbrowser.open(url)
+
+    def edit_selected(self) -> None:
+        if self.selected:
+            self.app.show("edit", record_id=self.selected.id)
+
+    def delete_selected(self) -> None:
+        rec = self.selected
+        vault = self.app.vault
+        if rec is None or vault is None:
+            return
+        if not messagebox.askyesno(APP_TITLE, f"Удалить запись «{rec.title}»?",
+                                   parent=self.app.root):
+            return
+        vault.delete(rec.id)
+        if self.app.save_vault():
+            self.selected = None
+            self.refresh()
+            self.app.toast("Запись удалена")
+
+    def toggle_pin(self) -> None:
+        self.app.set_topmost(not self.app.settings.always_on_top)
+        self._sync_pin()
+
+    def _sync_pin(self) -> None:
+        self.btn_pin.configure(style="IconOn.TButton" if self.app.settings.always_on_top
+                               else "Icon.TButton")
+
+    def _focus_list(self) -> None:
+        children = self.tree.get_children()
+        if not children:
+            return
+        self.tree.focus_set()
+        target = self.tree.selection()[0] if self.tree.selection() else children[0]
+        self.tree.selection_set(target)
+        self.tree.focus(target)
+
+    def _enter_from_search(self) -> None:
+        if self.selected:
+            self.copy_password()
+        else:
+            self._focus_list()
+
+    def _type_to_search(self, event: tk.Event) -> None:
+        if event.char and event.char.isprintable() and not event.state & 0x4:
+            self.search.focus_set()
+            self.search.insert("end", event.char)
+
+
+class EditScreen(Screen):
+    name = "edit"
+
+    def build(self) -> None:
+        self.record_id: str | None = None
+        self.vars = {k: tk.StringVar() for k in
+                     ("site", "url", "login", "email", "password", "totp", "folder", "tags")}
+        self.var_fav = tk.BooleanVar()
+        self.var_show = tk.BooleanVar(value=False)
+
+        bar = self.header("Новая запись")
+        self.lbl_head = bar.winfo_children()[-1]
+        star = Toggle(bar, self.var_fav, "★", "☆")
+        star.pack(side="right")
+        Tooltip(star, "Избранное", self.theme)
+
+        form = ttk.Frame(self)
+        form.pack(fill="both", expand=True)
+        form.columnconfigure(1, weight=1)
+        self.entries: dict[str, ttk.Entry] = {}
+
+        def field(r: int, key: str, label: str) -> ttk.Entry:
+            ttk.Label(form, text=label, style="Muted.TLabel").grid(
+                row=r, column=0, sticky="w", padx=(0, 8), pady=3)
+            entry = ttk.Entry(form, textvariable=self.vars[key])
+            entry.grid(row=r, column=1, sticky="ew", pady=3)
+            self.entries[key] = entry
+            return entry
+
+        field(0, "site", "Название")
+        field(1, "url", "Сайт (URL)")
+        field(2, "login", "Логин")
+        field(3, "email", "E-mail")
+
+        ttk.Label(form, text="Пароль", style="Muted.TLabel").grid(
+            row=4, column=0, sticky="w", padx=(0, 8), pady=(3, 0))
+        pw = ttk.Frame(form)
+        pw.grid(row=4, column=1, sticky="ew", pady=(3, 0))
+        self.entry_password = ttk.Entry(pw, textvariable=self.vars["password"], show="•",
+                                        font=self.theme.mono_small)
+        self.entry_password.pack(side="left", fill="x", expand=True)
+        Toggle(pw, self.var_show, "◉", "○", command=self._toggle_show).pack(
+            side="left", padx=(4, 0))
+        gen = ttk.Button(pw, text="⚄", style="Icon.TButton", width=2, command=self.quick_generate)
+        gen.pack(side="left")
+        Tooltip(gen, "Сгенерировать (настройки генератора)", self.theme)
+        self.entries["password"] = self.entry_password
+
+        meter = ttk.Frame(form)
+        meter.grid(row=5, column=1, sticky="ew", pady=(2, 3))
+        self.bar = StrengthBar(meter, self.theme)
+        self.bar.pack(fill="x", pady=(2, 0))
+        self.lbl_strength = ttk.Label(meter, style="Muted.TLabel")
+        self.lbl_strength.pack(anchor="w")
+        self.vars["password"].trace_add("write", lambda *_: self._update_strength())
+
+        field(6, "totp", "Секрет 2FA")
+        ttk.Label(form, text="Папка", style="Muted.TLabel").grid(
+            row=7, column=0, sticky="w", padx=(0, 8), pady=3)
+        self.folder_box = ttk.Combobox(form, textvariable=self.vars["folder"])
+        self.folder_box.grid(row=7, column=1, sticky="ew", pady=3)
+        field(8, "tags", "Теги")
+
+        ttk.Label(form, text="Заметка", style="Muted.TLabel").grid(
+            row=9, column=0, sticky="nw", padx=(0, 8), pady=3)
+        self.note = tk.Text(form, height=3, wrap="word", **self.theme.text_widget_options())
+        self.note.grid(row=9, column=1, sticky="nsew", pady=3)
+        form.rowconfigure(9, weight=1)
+
+        self.lbl_meta = ttk.Label(form, style="Muted.TLabel")
+        self.lbl_meta.grid(row=10, column=0, columnspan=2, sticky="w", pady=(2, 0))
+        self.btn_history = ttk.Button(form, style="Link.TButton", command=self.show_history)
+
+        btns = ttk.Frame(self)
+        btns.pack(fill="x", pady=(8, 8))
+        ttk.Button(btns, text="Сохранить", style="Accent.TButton",
+                   command=self.save).pack(side="right")
+        ttk.Button(btns, text="Отмена", command=self.cancel).pack(side="right", padx=(0, 6))
+        self.bind_all_keys()
+
+    def bind_all_keys(self) -> None:
+        for widget in (*self.entries.values(), self.folder_box):
+            widget.bind("<Return>", lambda _e: self.save())
+            widget.bind("<Escape>", lambda _e: self.cancel())
+
+    def on_show(self, record_id: str | None = None, password: str | None = None,
+                **_kwargs) -> None:
+        vault = self.app.vault
+        if vault is None:
+            self.app.show("lock")
+            return
+        rec = vault.get(record_id) if record_id else None
+        self.record_id = rec.id if rec else None
+        self.lbl_head.configure(text="Изменить запись" if rec else "Новая запись")
+        values = rec.to_dict() if rec else {}
+        for key, var in self.vars.items():
+            value = values.get(key, "")
+            var.set(", ".join(value) if key == "tags" else value)
+        self.var_fav.set(bool(values.get("favorite", False)))
+        self.note.delete("1.0", "end")
+        self.note.insert("1.0", values.get("note", ""))
+        self.folder_box.configure(values=vault.folders())
+        if password is not None:
+            self.vars["password"].set(password)
+        elif rec is None:
+            self.quick_generate()
+        self.var_show.set(rec is None)
+        self._toggle_show()
+        if rec:
+            self.lbl_meta.configure(text=f"Создано {rec.created[:16]}"
+                                    + (f" · изменено {rec.updated[:16]}" if rec.updated else ""))
+        else:
+            self.lbl_meta.configure(text="")
+        if rec and rec.history:
+            self.btn_history.configure(text=f"Старые пароли ({len(rec.history)})")
+            self.btn_history.grid(row=10, column=1, sticky="e")
+        else:
+            self.btn_history.grid_remove()
+        self.after(30, lambda: self.entries["site"].focus_set())
+
+    def _toggle_show(self) -> None:
+        self.entry_password.configure(show="" if self.var_show.get() else "•")
+
+    def _update_strength(self) -> None:
+        text, bits = strength_text(self.vars["password"].get())
+        self.lbl_strength.configure(text=text, foreground=self.theme.strength_color(bits))
+        self.bar.set(bits)
+
+    def quick_generate(self) -> None:
+        try:
+            self.vars["password"].set(generate_from_settings(self.app.settings))
+        except ValueError as e:
+            self.app.toast(str(e), "error")
+            return
+        self.var_show.set(True)
+        self._toggle_show()
+
+    def collect(self) -> dict:
+        data = {k: v.get().strip() for k, v in self.vars.items()}
+        data["password"] = self.vars["password"].get()  # spaces may be intentional
+        data["tags"] = [t.strip() for t in data["tags"].split(",") if t.strip()]
+        data["favorite"] = self.var_fav.get()
+        data["note"] = self.note.get("1.0", "end-1c").strip()
+        return data
+
+    def save(self) -> None:
+        vault = self.app.vault
+        if vault is None:
+            return
+        data = self.collect()
+        if not data["password"]:
+            self.app.toast("Пароль не может быть пустым", "error")
+            self.entry_password.focus_set()
+            return
+        if not (data["site"] or data["url"] or data["login"]):
+            self.app.toast("Заполните название, сайт или логин", "error")
+            self.entries["site"].focus_set()
+            return
+        if data["totp"]:
+            try:
+                data["totp"] = normalize_totp_secret(data["totp"])
+            except ValueError as e:
+                self.app.toast(str(e), "error")
+                self.entries["totp"].focus_set()
+                return
+        if self.record_id:
+            vault.edit(self.record_id, **data)
+            rec_id = self.record_id
+        else:
+            rec_id = vault.add(**data).id
+        if self.app.save_vault():
+            self.app.toast("Сохранено", "ok")
+            self.app.show("list", select=rec_id)
+
+    def cancel(self) -> None:
+        self.app.show("list")
+
+    def show_history(self) -> None:
+        rec = self.app.vault.get(self.record_id) if self.app.vault and self.record_id else None
+        if rec is None or not rec.history:
+            return
+        menu = tk.Menu(self, tearoff=False)
+        for item in rec.history:
+            label = f"{item.get('changed', '')[:16]}   {_short(item.get('password', ''), 24)}"
+            menu.add_command(label=label,
+                             command=lambda p=item.get("password", ""): self.app.copy(p, "Пароль"))
+        menu.add_separator()
+        menu.add_command(label="Нажмите на строку, чтобы скопировать", state="disabled")
+        x = self.btn_history.winfo_rootx()
+        y = self.btn_history.winfo_rooty() + self.btn_history.winfo_height()
+        menu.tk_popup(x, y)
+
+
+# ----------------------------------------------------------------------
+# helpers
+# ----------------------------------------------------------------------
+
+class Tooltip:
+    """Small hint shown after hovering a widget for a moment."""
+
+    def __init__(self, widget: tk.Widget, text: str, theme: Theme) -> None:
+        self.widget, self.text, self.theme = widget, text, theme
+        self.tip: tk.Toplevel | None = None
+        self.job: str | None = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+
+    def _schedule(self, _e=None) -> None:
+        self._hide()
+        self.job = self.widget.after(600, self._show)
+
+    def _show(self) -> None:
+        if self.tip or not self.widget.winfo_exists():
+            return
+        x = self.widget.winfo_rootx()
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
+        self.tip = tk.Toplevel(self.widget)
+        self.tip.wm_overrideredirect(True)
+        self.tip.attributes("-topmost", True)
+        tk.Label(self.tip, text=self.text, bg=self.theme.c["surface2"], fg=self.theme.c["fg"],
+                 font=self.theme.font_small, padx=6, pady=3, relief="flat").pack()
+        self.tip.update_idletasks()
+        # Keep the hint on screen near the right edge.
+        width = self.tip.winfo_width()
+        screen = self.widget.winfo_screenwidth()
+        self.tip.wm_geometry(f"+{min(x, screen - width - 4)}+{y}")
+
+    def _hide(self, _e=None) -> None:
+        if self.job:
+            self.widget.after_cancel(self.job)
+            self.job = None
+        if self.tip:
+            self.tip.destroy()
+            self.tip = None
+
+
+def generate_from_settings(settings: Settings) -> str:
+    """A password using whatever the generator screen was last set to."""
+    if settings.gen_mode == "passphrase":
+        return generate_passphrase(settings.gen_words, separator=settings.gen_separator)
+    if settings.gen_mode == "pin":
+        return generate_pin(settings.gen_pin_length)
+    return generate_password(
+        max(MIN_LENGTH, min(MAX_LENGTH, settings.gen_length)),
+        lowercase=settings.gen_lower, uppercase=settings.gen_upper,
+        digits=settings.gen_digits, symbols=settings.gen_symbols,
+        exclude_ambiguous=settings.gen_exclude_ambiguous,
+        full_symbols=settings.gen_full_symbols,
+    )
+
+
+def _short(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def strength_text(password: str) -> tuple[str, float]:
+    bits = estimate_entropy(password) if password else 0.0
+    return (f"{strength_label(bits)} · {bits:.0f} бит" if password else ""), bits
+
+
+SCREENS: list[type[Screen]] = [LockScreen, ListScreen, EditScreen]
+
+
 def run_app() -> None:
-    root = tk.Tk()
+    enable_hidpi()
     try:
-        App(root)
-        root.mainloop()
+        root = tk.Tk()
     except tk.TclError as e:
         # No display, e.g. running over a bare SSH session with no X forwarding.
         print(f"Не удалось открыть окно: {e}", flush=True)
-        print("Графическому интерфейсу нужен запущенный на ПК, не на сервере.", flush=True)
+        print("Графическому интерфейсу нужен рабочий стол.", flush=True)
         raise SystemExit(1) from e
+    App(root)
+    root.mainloop()

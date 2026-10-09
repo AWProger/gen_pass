@@ -38,6 +38,7 @@ from core import (
     Settings,
     Vault,
     __version__,
+    audit,
     estimate_entropy,
     export_csv,
     export_encrypted,
@@ -477,6 +478,9 @@ class ListScreen(Screen):
         self.folder_box.bind("<<ComboboxSelected>>", lambda _e: self.refresh())
         self.lbl_count = ttk.Label(filt, style="Muted.TLabel")
         self.lbl_count.pack(side="right")
+        self.btn_audit = ttk.Button(filt, style="Warn.TButton",
+                                    command=lambda: self.app.show("audit"))
+        Tooltip(self.btn_audit, "Слабые, повторяющиеся и старые пароли", self.theme)
 
         # Packed before the list so the card keeps its height and the list shrinks.
         self.bottom = ttk.Frame(self)
@@ -681,6 +685,13 @@ class ListScreen(Screen):
             title = ("★ " if r.favorite else "") + r.title
             self.tree.insert("", "end", iid=r.id, values=(title, r.login or r.email))
         total = len(vault.all())
+        problems = audit(vault.all())
+        bad = len({r.id for kind in ("weak", "reused", "empty") for r in problems[kind]})
+        if bad:
+            self.btn_audit.configure(text=f"⚠ {bad}")
+            self.btn_audit.pack(side="right", padx=(0, 6))
+        else:
+            self.btn_audit.pack_forget()
         self.lbl_count.configure(text=f"{len(recs)} из {total}" if len(recs) != total
                                  else f"{total}")
 
@@ -1545,6 +1556,83 @@ class SettingsScreen(Screen):
         self.app.toast("Хранилище удалено")
 
 
+class AuditScreen(Screen):
+    name = "audit"
+
+    KINDS = (
+        ("weak", "Слабые", "меньше 60 бит — подбираются перебором"),
+        ("reused", "Повторяются", "утечка на одном сайте откроет и другие"),
+        ("old", "Старые", "не менялись больше года"),
+        ("empty", "Пустые", "запись без пароля"),
+    )
+    SHORT = {"weak": "слабый", "reused": "повтор", "old": "старый", "empty": "пустой"}
+
+    def build(self) -> None:
+        self.header("Проверка паролей")
+        self.summary = ttk.Frame(self)
+        self.summary.pack(fill="x")
+        self.summary.columnconfigure(1, weight=1)
+        self.counts: dict[str, ttk.Label] = {}
+        for row, (kind, title, hint) in enumerate(self.KINDS):
+            count = ttk.Label(self.summary, style="Title.TLabel", width=3, anchor="e")
+            count.grid(row=row, column=0, sticky="e", padx=(0, 10), pady=2)
+            text = ttk.Frame(self.summary)
+            text.grid(row=row, column=1, sticky="w", pady=2)
+            ttk.Label(text, text=title, style="Bold.TLabel").pack(anchor="w")
+            ttk.Label(text, text=hint, style="Muted.TLabel").pack(anchor="w")
+            self.counts[kind] = count
+
+        self.lbl_ok = ttk.Label(self, style="Ok.TLabel", wraplength=320, justify="left")
+        frame = ttk.Frame(self, style="Card.TFrame")
+        frame.pack(fill="both", expand=True, pady=(10, 0))
+        self.tree = ttk.Treeview(frame, columns=("title", "issue"), show="",
+                                 selectmode="browse", height=4)
+        self.tree.column("title", width=180, stretch=True)
+        self.tree.column("issue", width=120, stretch=False)
+        sb = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=sb.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+        self.tree.bind("<Double-1>", lambda _e: self.open_selected())
+        self.tree.bind("<Return>", lambda _e: self.open_selected())
+        ttk.Label(self, text="Двойной клик — открыть и сменить пароль",
+                  style="Muted.TLabel").pack(anchor="w", pady=(6, 8))
+
+    def on_show(self, **_kwargs) -> None:
+        vault = self.app.vault
+        if vault is None:
+            self.app.show("lock")
+            return
+        result = audit(vault.all())
+        issues: dict[str, list[str]] = {}
+        for kind, _title, _hint in self.KINDS:
+            recs = result[kind]
+            self.counts[kind].configure(
+                text=str(len(recs)),
+                foreground=self.theme.c["danger" if recs and kind != "old" else
+                                        "warn" if recs else "ok"])
+            for r in recs:
+                issues.setdefault(r.id, []).append(self.SHORT[kind])
+        self.tree.delete(*self.tree.get_children())
+        for rec in sorted(vault.all(), key=lambda r: r.title.lower()):
+            if rec.id in issues:
+                self.tree.insert("", "end", iid=rec.id,
+                                 values=(rec.title, ", ".join(issues[rec.id])))
+        if not issues:
+            self.lbl_ok.configure(text="Проблем не найдено. Все пароли стойкие и разные.")
+            self.lbl_ok.pack(fill="x", pady=(10, 0), after=self.summary)
+        else:
+            self.lbl_ok.pack_forget()
+
+    def on_escape(self) -> None:
+        self.app.show("list")
+
+    def open_selected(self) -> None:
+        sel = self.tree.selection()
+        if sel:
+            self.app.show("edit", record_id=sel[0])
+
+
 # ----------------------------------------------------------------------
 # helpers
 # ----------------------------------------------------------------------
@@ -1705,7 +1793,7 @@ def strength_text(password: str) -> tuple[str, float]:
 
 
 SCREENS: list[type[Screen]] = [LockScreen, ListScreen, EditScreen, GeneratorScreen,
-                               SettingsScreen]
+                               SettingsScreen, AuditScreen]
 
 
 def run_app() -> None:

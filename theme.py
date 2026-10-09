@@ -150,6 +150,8 @@ class Theme:
                     bordercolor=c["select"], padding=(5, 1), relief="flat", font=self.font)
         s.configure("Link.TButton", background=c["bg"], foreground=c["accent"],
                     bordercolor=c["bg"], padding=(2, 0), relief="flat", font=self.font_small)
+        s.configure("Warn.TButton", background=c["bg"], foreground=c["warn"],
+                    bordercolor=c["bg"], padding=(2, 0), relief="flat", font=self.font_small)
         s.map("Link.TButton", background=[("active", c["bg"])],
               foreground=[("active", c["accent_hover"])])
 

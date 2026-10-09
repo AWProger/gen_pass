@@ -12,7 +12,6 @@ cannot open a window there. That case used to produce a confusing traceback.
 import sys
 
 from core import __version__
-from ui import run_app
 
 
 def main() -> int:
@@ -37,6 +36,16 @@ def main() -> int:
         )
         return 1
 
+    # Imported only now: --version and --help must work where tkinter is missing.
+    try:
+        from ui import run_app
+    except ImportError:
+        print(
+            "Не найден модуль tkinter.\n"
+            "Linux: sudo apt install python3-tk. Windows: используйте готовый .exe.",
+            file=sys.stderr,
+        )
+        return 1
     run_app()
     return 0
 

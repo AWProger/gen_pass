@@ -43,7 +43,7 @@ gen-pass = "main:main"
 
 [tool.setuptools]
 # Flat layout: the modules sit at the repo root, not inside a package.
-py-modules = ["core", "ui", "main"]
+py-modules = ["core", "theme", "ui", "main"]
 include-package-data = false
 
 [tool.pytest.ini_options]

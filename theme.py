@@ -134,11 +134,11 @@ class Theme:
         s.map("Danger.TButton", background=[("active", c["border"])])
         # Square icon buttons for the toolbar.
         s.configure("Icon.TButton", background=c["bg"], foreground=c["fg"],
-                    bordercolor=c["bg"], padding=(6, 3), relief="flat", font=self.font_icon)
+                    bordercolor=c["bg"], padding=(4, 3), relief="flat", font=self.font_icon)
         s.map("Icon.TButton", background=[("pressed", c["border"]), ("active", c["surface2"])],
               bordercolor=[("active", c["surface2"])])
         s.configure("IconOn.TButton", background=c["select"], foreground=c["fg"],
-                    bordercolor=c["select"], padding=(6, 3), relief="flat", font=self.font_icon)
+                    bordercolor=c["select"], padding=(4, 3), relief="flat", font=self.font_icon)
         s.map("IconOn.TButton", background=[("active", c["select"])])
         s.configure("Star.TButton", background=c["bg"], foreground=c["warn"],
                     bordercolor=c["bg"], padding=(6, 3), relief="flat", font=self.font_icon)
@@ -309,3 +309,48 @@ class Toggle(ttk.Button):
         else:
             style = "IconOn.TButton" if on else "Icon.TButton"
         self.configure(text=self.text_on if on else self.text_off, style=style)
+
+
+class ScrollFrame(ttk.Frame):
+    """A vertically scrolling container; put children into `.inner`."""
+
+    def __init__(self, master: tk.Misc, theme: Theme) -> None:
+        super().__init__(master)
+        self.canvas = tk.Canvas(self, highlightthickness=0, bd=0, bg=theme.c["bg"])
+        self.bar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.inner = ttk.Frame(self.canvas)
+        self._win = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
+        self.canvas.configure(yscrollcommand=self.bar.set)
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.bar.pack(side="right", fill="y")
+        self.inner.bind("<Configure>", lambda _e: self._sync())
+        self.canvas.bind("<Configure>", lambda e: (
+            self.canvas.itemconfigure(self._win, width=e.width), self._sync()))
+        self.bind("<Enter>", lambda _e: self._wheel(True))
+        self.bind("<Leave>", lambda _e: self._wheel(False))
+
+    def _sync(self) -> None:
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        fits = self.inner.winfo_reqheight() <= self.canvas.winfo_height()
+        if fits:
+            self.bar.pack_forget()
+            self.canvas.yview_moveto(0)
+        elif not self.bar.winfo_ismapped():
+            self.bar.pack(side="right", fill="y")
+
+    def _wheel(self, on: bool) -> None:
+        if on:
+            self.bind_all("<MouseWheel>", self._on_wheel)
+            self.bind_all("<Button-4>", lambda _e: self._scroll(-1))
+            self.bind_all("<Button-5>", lambda _e: self._scroll(1))
+        else:
+            self.unbind_all("<MouseWheel>")
+            self.unbind_all("<Button-4>")
+            self.unbind_all("<Button-5>")
+
+    def _on_wheel(self, event: tk.Event) -> None:
+        self._scroll(-1 if event.delta > 0 else 1)
+
+    def _scroll(self, units: int) -> None:
+        if self.bar.winfo_ismapped():
+            self.canvas.yview_scroll(units * 2, "units")

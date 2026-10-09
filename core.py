@@ -825,6 +825,19 @@ def export_encrypted(records: list[Record], path: Path | str, passphrase: str) -
     return p
 
 
+def import_json(path: Path | str) -> list[Record]:
+    """Read a plaintext export made by export_plaintext()."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8-sig"))
+    except ValueError as e:
+        raise ValueError("Файл не похож на экспорт в JSON") from e
+    if isinstance(data, dict):
+        data = data.get("records", [])
+    if not isinstance(data, list) or not all(isinstance(r, dict) for r in data):
+        raise ValueError("Файл не похож на экспорт в JSON")
+    return [Record.from_dict(r) for r in data]
+
+
 def import_encrypted(path: Path | str, passphrase: str) -> list[Record]:
     blob = Path(path).read_bytes()
     if blob[:4] != b"AWPE":

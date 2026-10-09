@@ -36,17 +36,23 @@ from core import (
     Record,
     Settings,
     Vault,
+    __version__,
     estimate_entropy,
+    export_csv,
+    export_encrypted,
     generate_passphrase,
     generate_password,
     generate_pin,
+    import_csv,
+    import_encrypted,
+    import_json,
     normalize_totp_secret,
     passphrase_entropy,
     strength_label,
     totp,
     totp_remaining,
 )
-from theme import PlaceholderEntry, StrengthBar, Theme, Toggle, enable_hidpi
+from theme import PlaceholderEntry, ScrollFrame, StrengthBar, Theme, Toggle, enable_hidpi
 
 APP_TITLE = "Генератор паролей"
 DEFAULT_GEOMETRY = "380x580"
@@ -392,17 +398,19 @@ class ListScreen(Screen):
 
         top = ttk.Frame(self)
         top.pack(fill="x")
+        # Toolbar first: when the window is narrow the search box gives way, not the icons.
+        self.toolbar = ttk.Frame(top)
+        self.toolbar.pack(side="right", padx=(4, 0))
         self.search = PlaceholderEntry(top, self.theme, "Поиск  (Ctrl+F)", self.var_search)
         self.search.pack(side="left", fill="x", expand=True)
         self.var_search.trace_add("write", lambda *_: self.refresh())
         self.search.bind("<Down>", lambda _e: self._focus_list())
         self.search.bind("<Return>", lambda _e: self._enter_from_search())
         self.search.bind("<Escape>", lambda _e: self.var_search.set(""))
-        self.toolbar = ttk.Frame(top)
-        self.toolbar.pack(side="right", padx=(6, 0))
         self.add_tool("＋", "Новая запись (Ctrl+N)", lambda: self.app.show("edit"))
         self.add_tool("⚄", "Генератор (Ctrl+G)", lambda: self.app.show("generator"))
         self.btn_pin = self.add_tool("▣", "Поверх всех окон", self.toggle_pin)
+        self.add_tool("⚙", "Настройки", lambda: self.app.show("settings"))
         self.add_tool("⏻", "Заблокировать (Ctrl+L)", self.app.lock)
         self._sync_pin()
 
@@ -444,7 +452,7 @@ class ListScreen(Screen):
     def add_tool(self, text: str, tip: str, command) -> ttk.Button:
         btn = ttk.Button(self.toolbar, text=text, style="Icon.TButton", width=2,
                          command=command)
-        btn.pack(side="left", padx=(2, 0))
+        btn.pack(side="left")
         Tooltip(btn, tip, self.theme)
         return btn
 
@@ -642,9 +650,7 @@ class ListScreen(Screen):
     def open_url(self) -> None:
         rec = self.selected
         if rec and rec.url:
-            import webbrowser
-            url = rec.url if "://" in rec.url else "https://" + rec.url
-            webbrowser.open(url)
+            _open_url(rec.url if "://" in rec.url else "https://" + rec.url)
 
     def edit_selected(self) -> None:
         if self.selected:
@@ -1088,6 +1094,298 @@ class GeneratorScreen(Screen):
             self.app.show("edit", password=self.password)
 
 
+class SettingsScreen(Screen):
+    name = "settings"
+
+    def build(self) -> None:
+        st = self.app.settings
+        self.header("Настройки")
+        scroll = ScrollFrame(self, self.theme)
+        scroll.pack(fill="both", expand=True)
+        body = scroll.inner
+        body.configure(padding=(0, 0, 8, 12))
+
+        self.var_theme = tk.StringVar(value=st.theme)
+        self.var_top = tk.BooleanVar(value=st.always_on_top)
+        self.var_autolock = tk.IntVar(value=st.auto_lock_minutes)
+        self.var_clip = tk.IntVar(value=st.clipboard_seconds)
+        self.var_minimize = tk.BooleanVar(value=st.lock_on_minimize)
+        self.var_backups = tk.BooleanVar(value=st.backups)
+
+        self.section(body, "Внешний вид")
+        seg = ttk.Frame(body)
+        seg.pack(fill="x")
+        for i, (value, text) in enumerate((("dark", "Тёмная"), ("light", "Светлая"))):
+            seg.columnconfigure(i, weight=1, uniform="t")
+            ttk.Radiobutton(seg, text=text, value=value, variable=self.var_theme,
+                            style="Segment.TRadiobutton",
+                            command=lambda: self.app.set_theme(self.var_theme.get())).grid(
+                row=0, column=i, sticky="ew")
+        ttk.Checkbutton(body, text="Поверх всех окон", variable=self.var_top,
+                        command=lambda: self.app.set_topmost(self.var_top.get())).pack(
+            anchor="w", pady=(8, 0))
+
+        self.section(body, "Безопасность")
+        self.spin_row(body, "Блокировать через", self.var_autolock, 0, 240, "мин без действий")
+        self.spin_row(body, "Очищать буфер через", self.var_clip, 0, 600, "с")
+        ttk.Checkbutton(body, text="Блокировать при сворачивании окна",
+                        variable=self.var_minimize, command=self.apply).pack(anchor="w")
+        ttk.Checkbutton(body, text="Резервная копия при каждом сохранении",
+                        variable=self.var_backups, command=self.apply).pack(anchor="w", pady=(4, 0))
+        ttk.Label(body, text="0 — не блокировать / не очищать", style="Muted.TLabel").pack(
+            anchor="w", pady=(4, 0))
+
+        self.vault_widgets: list[ttk.Button] = []
+        self.section(body, "Хранилище")
+        self.lbl_path = ttk.Label(body, style="Muted.TLabel", wraplength=300, justify="left")
+        self.lbl_path.pack(anchor="w")
+        self.buttons(body, (("Сменить пароль…", self.change_master),
+                            ("Резервные копии", self.open_backups)))
+
+        self.section(body, "Импорт")
+        self.buttons(body, (("Из CSV…", self.import_csv),
+                            ("Из .awpe / .json…", self.import_file)))
+        ttk.Label(body, style="Muted.TLabel", wraplength=300, justify="left",
+                  text="CSV из Chrome, Edge, Firefox, Bitwarden, KeePass, 1Password, "
+                       "LastPass. Дубликаты пропускаются.").pack(anchor="w", pady=(4, 0))
+
+        self.section(body, "Экспорт")
+        self.buttons(body, (("Зашифрованный…", self.export_encrypted),
+                            ("В CSV…", self.export_csv)))
+
+        self.section(body, "Опасная зона")
+        btn = ttk.Button(body, text="Удалить хранилище…", style="Danger.TButton",
+                         command=self.delete_vault)
+        btn.pack(anchor="w")
+        self.vault_widgets.append(btn)
+
+        self.section(body, "О программе")
+        ttk.Label(body, text=f"{APP_TITLE} {__version__} · MIT\nРаботает без интернета, "
+                             "ничего никуда не отправляет.",
+                  style="Muted.TLabel", justify="left", wraplength=300).pack(anchor="w")
+        ttk.Button(body, text="github.com/AWProger/gen_pass", style="Link.TButton",
+                   command=lambda: _open_url("https://github.com/AWProger/gen_pass")).pack(
+            anchor="w")
+
+    def section(self, parent, title: str) -> None:
+        ttk.Label(parent, text=title, style="Bold.TLabel").pack(anchor="w", pady=(14, 6))
+
+    def spin_row(self, parent, label: str, var: tk.IntVar, lo: int, hi: int, unit: str) -> None:
+        row = ttk.Frame(parent)
+        row.pack(fill="x", pady=(0, 6))
+        ttk.Label(row, text=label).pack(side="left")
+        spin = ttk.Spinbox(row, from_=lo, to=hi, textvariable=var, width=5,
+                           command=self.apply)
+        spin.pack(side="left", padx=6)
+        spin.bind("<FocusOut>", lambda _e: self.apply())
+        spin.bind("<Return>", lambda _e: self.apply())
+        ttk.Label(row, text=unit, style="Muted.TLabel").pack(side="left")
+
+    def buttons(self, parent, items) -> None:
+        row = ttk.Frame(parent)
+        row.pack(fill="x")
+        for i, (text, command) in enumerate(items):
+            row.columnconfigure(i, weight=1, uniform="b")
+            btn = ttk.Button(row, text=text, command=command)
+            btn.grid(row=0, column=i, sticky="ew", padx=(0 if i == 0 else 6, 0))
+            self.vault_widgets.append(btn)
+
+    def on_show(self, **_kwargs) -> None:
+        self.var_top.set(self.app.settings.always_on_top)
+        vault = self.app.vault
+        self.lbl_path.configure(text=str(vault.path if vault else self.app.settings.vault_file()))
+        state = "normal" if vault else "disabled"
+        for btn in self.vault_widgets:
+            btn.configure(state=state)
+
+    def apply(self) -> None:
+        st = self.app.settings
+
+        def number(var: tk.IntVar, lo: int, hi: int, default: int) -> int:
+            try:
+                return max(lo, min(hi, int(var.get())))
+            except (tk.TclError, ValueError):
+                return default
+
+        st.auto_lock_minutes = number(self.var_autolock, 0, 240, st.auto_lock_minutes)
+        st.clipboard_seconds = number(self.var_clip, 0, 600, st.clipboard_seconds)
+        self.var_autolock.set(st.auto_lock_minutes)
+        self.var_clip.set(st.clipboard_seconds)
+        st.lock_on_minimize = self.var_minimize.get()
+        st.backups = self.var_backups.get()
+        if self.app.vault:
+            self.app.vault.backups = st.backups
+        self.app.save_settings()
+
+    # -- vault actions ---------------------------------------------------
+
+    def change_master(self) -> None:
+        vault = self.app.vault
+        if vault is None:
+            return
+
+        def check(values: list[str]) -> str:
+            old, new, again = values
+            if not vault.verify(old):
+                return "Текущий пароль неверен"
+            if len(new) < 8:
+                return "Новый пароль короче 8 символов"
+            if new != new.strip():
+                return "Уберите пробелы в начале или в конце"
+            if new != again:
+                return "Новые пароли не совпадают"
+            return ""
+
+        values = ask_passwords(self.app, "Смена мастер-пароля",
+                               ["Текущий пароль", "Новый пароль", "Ещё раз"], check)
+        if not values:
+            return
+        try:
+            vault.change_passphrase(values[0], values[1])
+        except (ValueError, OSError) as e:
+            messagebox.showerror(APP_TITLE, f"Не удалось сменить пароль: {e}",
+                                 parent=self.app.root)
+            return
+        self.app.toast("Мастер-пароль изменён", "ok")
+
+    def open_backups(self) -> None:
+        vault = self.app.vault
+        if vault is None:
+            return
+        backups = vault.list_backups()
+        if not backups:
+            messagebox.showinfo(APP_TITLE, "Резервных копий пока нет. Они появляются при "
+                                "каждом сохранении.", parent=self.app.root)
+            return
+        _open_path(vault.backup_dir)
+        self.app.toast(f"Копий: {len(backups)}. Любую можно открыть через «Другой файл…»")
+
+    def _merge(self, records: list[Record], source: str) -> None:
+        vault = self.app.vault
+        if vault is None:
+            return
+        if not records:
+            messagebox.showinfo(APP_TITLE, "В файле нет записей.", parent=self.app.root)
+            return
+        if not messagebox.askyesno(APP_TITLE, f"Добавить записей из {source}: {len(records)}?\n"
+                                   "Существующие записи останутся, дубликаты будут пропущены.",
+                                   parent=self.app.root):
+            return
+        added, skipped = vault.merge(records)
+        if self.app.save_vault():
+            self.app.toast(f"Добавлено: {added}" + (f", пропущено дубликатов: {skipped}"
+                                                     if skipped else ""), "ok")
+
+    def import_csv(self) -> None:
+        path = filedialog.askopenfilename(parent=self.app.root, title="Импорт из CSV",
+                                          filetypes=[("CSV", "*.csv"), ("Все файлы", "*.*")])
+        if not path:
+            return
+        try:
+            records = import_csv(path)
+        except (ValueError, OSError, UnicodeDecodeError) as e:
+            messagebox.showerror(APP_TITLE, f"Импорт не удался: {e}", parent=self.app.root)
+            return
+        self._merge(records, "CSV")
+
+    def import_file(self) -> None:
+        path = filedialog.askopenfilename(
+            parent=self.app.root, title="Импорт",
+            filetypes=[("Экспорт", "*.awpe *.json"), ("Все файлы", "*.*")])
+        if not path:
+            return
+        try:
+            if Path(path).read_bytes()[:4] == b"AWPE":
+                values = ask_passwords(self.app, "Пароль от файла", ["Пароль экспорта"])
+                if not values:
+                    return
+                records = import_encrypted(path, values[0])
+            else:
+                records = import_json(path)
+        except (ValueError, OSError, UnicodeDecodeError) as e:
+            messagebox.showerror(APP_TITLE, f"Импорт не удался: {e}", parent=self.app.root)
+            return
+        self._merge(records, "файла")
+
+    def export_encrypted(self) -> None:
+        vault = self.app.vault
+        if vault is None or not self._has_records():
+            return
+
+        def check(values: list[str]) -> str:
+            if len(values[0]) < 8:
+                return "Пароль короче 8 символов"
+            return "" if values[0] == values[1] else "Пароли не совпадают"
+
+        values = ask_passwords(self.app, "Пароль для файла экспорта",
+                               ["Пароль", "Ещё раз"], check,
+                               note="Можно указать мастер-пароль или другой.")
+        if not values:
+            return
+        path = filedialog.asksaveasfilename(parent=self.app.root, title="Экспорт",
+                                            defaultextension=".awpe",
+                                            filetypes=[("Зашифрованный экспорт", "*.awpe")])
+        if not path:
+            return
+        try:
+            export_encrypted(vault.all(), path, values[0])
+        except OSError as e:
+            messagebox.showerror(APP_TITLE, f"Ошибка экспорта: {e}", parent=self.app.root)
+            return
+        self.app.toast(f"Экспортировано записей: {len(vault.all())}", "ok")
+
+    def export_csv(self) -> None:
+        vault = self.app.vault
+        if vault is None or not self._has_records():
+            return
+        if not messagebox.askyesno(
+                APP_TITLE, "CSV записывает пароли обычным текстом. Любой, кто прочитает "
+                "файл, увидит все пароли.\n\nУдалите файл сразу после переноса. Продолжить?",
+                icon="warning", parent=self.app.root):
+            return
+        path = filedialog.asksaveasfilename(parent=self.app.root, title="Экспорт в CSV",
+                                            defaultextension=".csv",
+                                            filetypes=[("CSV", "*.csv")])
+        if not path:
+            return
+        try:
+            export_csv(vault.all(), path)
+        except OSError as e:
+            messagebox.showerror(APP_TITLE, f"Ошибка экспорта: {e}", parent=self.app.root)
+            return
+        self.app.toast(f"Экспортировано записей: {len(vault.all())}", "ok")
+
+    def _has_records(self) -> bool:
+        if self.app.vault and self.app.vault.all():
+            return True
+        messagebox.showinfo(APP_TITLE, "Нечего экспортировать: хранилище пусто.",
+                            parent=self.app.root)
+        return False
+
+    def delete_vault(self) -> None:
+        vault = self.app.vault
+        if vault is None:
+            return
+        if not messagebox.askyesno(
+                APP_TITLE, f"Удалить файл хранилища?\n\n{vault.path}\n\n"
+                "Все пароли будут потеряны. Резервные копии останутся в папке backups.",
+                icon="warning", parent=self.app.root):
+            return
+        values = ask_passwords(self.app, "Подтвердите удаление", ["Мастер-пароль"],
+                               lambda v: "" if vault.verify(v[0]) else "Неверный пароль")
+        if not values:
+            return
+        try:
+            vault.path.unlink(missing_ok=True)
+            vault.path.with_suffix(".salt").unlink(missing_ok=True)
+        except OSError as e:
+            messagebox.showerror(APP_TITLE, f"Не удалось удалить: {e}", parent=self.app.root)
+            return
+        self.app.vault = None
+        self.app.show("lock")
+        self.app.toast("Хранилище удалено")
+
+
 # ----------------------------------------------------------------------
 # helpers
 # ----------------------------------------------------------------------
@@ -1132,6 +1430,78 @@ class Tooltip:
             self.tip = None
 
 
+def ask_passwords(app: App, title: str, labels: list[str], check=None,
+                  note: str = "") -> list[str] | None:
+    """Small modal dialog with masked fields. Returns the values, or None on cancel."""
+    root = app.root
+    dlg = tk.Toplevel(root)
+    dlg.title(title)
+    dlg.configure(bg=app.theme.c["bg"])
+    dlg.transient(root)
+    dlg.resizable(False, False)
+    dlg.attributes("-topmost", app.settings.always_on_top)
+    frame = ttk.Frame(dlg, padding=16)
+    frame.pack(fill="both", expand=True)
+    ttk.Label(frame, text=title, style="Bold.TLabel").pack(anchor="w", pady=(0, 8))
+    if note:
+        ttk.Label(frame, text=note, style="Muted.TLabel", wraplength=260).pack(
+            anchor="w", pady=(0, 8))
+    vars_ = [tk.StringVar() for _ in labels]
+    entries = []
+    for label, var in zip(labels, vars_, strict=True):
+        ttk.Label(frame, text=label, style="Muted.TLabel").pack(anchor="w")
+        entry = ttk.Entry(frame, textvariable=var, show="•", width=32)
+        entry.pack(fill="x", pady=(2, 8))
+        entries.append(entry)
+    error = ttk.Label(frame, style="Danger.TLabel", wraplength=260)
+    error.pack(anchor="w")
+    result: list[list[str] | None] = [None]
+
+    def ok(_e=None) -> None:
+        values = [v.get() for v in vars_]
+        if not values[0]:
+            error.configure(text="Введите пароль")
+            return
+        message = check(values) if check else ""
+        if message:
+            error.configure(text=message)
+            return
+        result[0] = values
+        dlg.destroy()
+
+    btns = ttk.Frame(frame)
+    btns.pack(fill="x", pady=(8, 0))
+    ttk.Button(btns, text="OK", style="Accent.TButton", command=ok).pack(side="right")
+    ttk.Button(btns, text="Отмена", command=dlg.destroy).pack(side="right", padx=(0, 6))
+    dlg.bind("<Return>", ok)
+    dlg.bind("<Escape>", lambda _e: dlg.destroy())
+    dlg.update_idletasks()
+    x = root.winfo_rootx() + (root.winfo_width() - dlg.winfo_reqwidth()) // 2
+    y = root.winfo_rooty() + 60
+    dlg.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+    entries[0].focus_set()
+    dlg.grab_set()
+    root.wait_window(dlg)
+    return result[0]
+
+
+def _open_url(url: str) -> None:
+    import webbrowser
+    webbrowser.open(url)
+
+
+def _open_path(path: Path) -> None:
+    """Show a folder in the system file manager."""
+    import os
+    import subprocess
+    if sys.platform == "win32":
+        os.startfile(path)  # noqa: S606 - opening a local folder the app itself created
+    elif sys.platform == "darwin":
+        subprocess.run(["open", str(path)], check=False)  # noqa: S603, S607
+    else:
+        subprocess.run(["xdg-open", str(path)], check=False)  # noqa: S603, S607
+
+
 def generate_from_settings(settings: Settings) -> str:
     """A password using whatever the generator screen was last set to."""
     if settings.gen_mode == "passphrase":
@@ -1156,7 +1526,8 @@ def strength_text(password: str) -> tuple[str, float]:
     return (f"{strength_label(bits)} · {bits:.0f} бит" if password else ""), bits
 
 
-SCREENS: list[type[Screen]] = [LockScreen, ListScreen, EditScreen, GeneratorScreen]
+SCREENS: list[type[Screen]] = [LockScreen, ListScreen, EditScreen, GeneratorScreen,
+                               SettingsScreen]
 
 
 def run_app() -> None:

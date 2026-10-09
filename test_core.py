@@ -41,6 +41,7 @@ from core import (
     audit,
     export_csv,
     import_csv,
+    import_json,
 )
 
 
@@ -736,3 +737,13 @@ def test_settings_ignores_wrong_types_and_unknown_keys(tmp_path):
         json.dumps({"gen_length": "huge", "theme": "light", "future": 1}), encoding="utf-8")
     s = Settings.load(tmp_path / "s.json")
     assert s.gen_length == Settings().gen_length and s.theme == "light"
+
+
+def test_import_json_roundtrip(tmp_path):
+    recs = [Record(id="1", password="p", site="s", tags=["t"])]
+    export_plaintext(recs, tmp_path / "e.json")
+    [r] = import_json(tmp_path / "e.json")
+    assert (r.password, r.site, r.tags) == ("p", "s", ["t"])
+    (tmp_path / "bad.json").write_text('"text"', encoding="utf-8")
+    with pytest.raises(ValueError):
+        import_json(tmp_path / "bad.json")

@@ -30,6 +30,9 @@ from core import (
     generate_password,
     import_encrypted,
     strength_label,
+    normalize_totp_secret,
+    totp,
+    totp_remaining,
     build_alphabet,
 )
 
@@ -498,3 +501,44 @@ def test_extended_fields_survive_save(tmp_path):
     v2.unlock("passphrase-1")
     r = v2.all()[0]
     assert (r.folder, r.tags, r.favorite, r.totp) == ("F", ["t"], True, "JBSWY3DPEHPK3PXP")
+
+
+# --------------------------------------------------------------------------
+# TOTP
+# --------------------------------------------------------------------------
+
+# RFC 6238 appendix B, SHA-1 secret "12345678901234567890".
+RFC_SECRET = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+
+
+@pytest.mark.parametrize("at, code", [
+    (59, "94287082"),
+    (1111111109, "07081804"),
+    (1111111111, "14050471"),
+    (1234567890, "89005924"),
+    (2000000000, "69279037"),
+])
+def test_totp_matches_rfc_vectors(at, code):
+    assert totp(RFC_SECRET, at, digits=8) == code
+
+
+def test_totp_six_digits_by_default():
+    assert totp(RFC_SECRET, 59) == "287082"
+
+
+def test_totp_accepts_spaces_lowercase_and_uri():
+    spaced = "gezd gnbv gy3t qojq gezd gnbv gy3t qojq"
+    uri = f"otpauth://totp/Ex:me?secret={RFC_SECRET}&issuer=Ex"
+    assert totp(spaced, 59) == totp(uri, 59) == "287082"
+
+
+def test_totp_rejects_garbage():
+    with pytest.raises(ValueError):
+        normalize_totp_secret("not base32 !!!")
+    with pytest.raises(ValueError):
+        normalize_totp_secret("   ")
+
+
+def test_totp_remaining():
+    assert totp_remaining(60) == 30
+    assert totp_remaining(89) == 1

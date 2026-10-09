@@ -24,7 +24,11 @@ Design notes for the rework:
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import hmac
+import struct
+import time
 import json
 import os
 import secrets
@@ -118,7 +122,6 @@ def decrypt(blob: bytes, key: bytes) -> bytes:
     expected = hashlib.blake2b(nonce + cipher, key=mac_key, digest_size=32).digest()
 
     # Constant-time compare: a plain == would leak timing information.
-    import hmac
     if not hmac.compare_digest(tag, expected):
         raise ValueError("Неверный пароль или файл был изменён")
 
@@ -266,6 +269,51 @@ def strength_label(bits: float) -> str:
     if bits < 120:
         return "Сильный"
     return "Очень сильный"
+
+
+# --------------------------------------------------------------------------
+# Two-factor codes (TOTP, RFC 6238)
+# --------------------------------------------------------------------------
+
+TOTP_PERIOD = 30
+
+
+def normalize_totp_secret(secret: str) -> str:
+    """Accept a raw Base32 secret or an otpauth:// URI; return clean Base32.
+
+    Raises ValueError when the input is not valid Base32.
+    """
+    secret = secret.strip()
+    if secret.lower().startswith("otpauth://"):
+        from urllib.parse import parse_qs, urlparse
+        params = parse_qs(urlparse(secret).query)
+        secret = params.get("secret", [""])[0]
+    cleaned = secret.replace(" ", "").replace("-", "").upper().rstrip("=")
+    if not cleaned:
+        raise ValueError("Пустой секрет 2FA")
+    try:
+        base64.b32decode(cleaned + "=" * (-len(cleaned) % 8))
+    except (ValueError, base64.binascii.Error) as e:
+        raise ValueError("Секрет 2FA должен быть в формате Base32 (буквы A-Z и цифры 2-7)") from e
+    return cleaned
+
+
+def totp(secret: str, at: float | None = None, *, digits: int = 6,
+         period: int = TOTP_PERIOD, algorithm: str = "sha1") -> str:
+    """Current one-time code for a Base32 secret."""
+    cleaned = normalize_totp_secret(secret)
+    key = base64.b32decode(cleaned + "=" * (-len(cleaned) % 8))
+    counter = int((time.time() if at is None else at) // period)
+    digest = hmac.new(key, struct.pack(">Q", counter), algorithm).digest()
+    offset = digest[-1] & 0x0F
+    code = struct.unpack(">I", digest[offset:offset + 4])[0] & 0x7FFFFFFF
+    return str(code % 10 ** digits).zfill(digits)
+
+
+def totp_remaining(at: float | None = None, period: int = TOTP_PERIOD) -> int:
+    """Seconds until the current code expires."""
+    now = time.time() if at is None else at
+    return period - int(now) % period
 
 
 # --------------------------------------------------------------------------

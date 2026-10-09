@@ -17,6 +17,8 @@ from pathlib import Path
 
 PROJECT_DIR = Path(SPECPATH)
 ICON = PROJECT_DIR / "build_assets" / "icon.ico"
+# The window icon is loaded at runtime from build_assets/icon.png (see ui.App._set_icon).
+WINDOW_ICON = PROJECT_DIR / "build_assets" / "icon.png"
 VERSION_FILE = PROJECT_DIR / "build_assets" / "version_info.txt"
 
 block_cipher = None
@@ -25,7 +27,7 @@ analysis = Analysis(
     ["main.py"],
     pathex=[str(PROJECT_DIR)],
     binaries=[],
-    datas=[],
+    datas=[(str(WINDOW_ICON), "build_assets")] if WINDOW_ICON.exists() else [],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

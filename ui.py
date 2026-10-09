@@ -31,6 +31,8 @@ from tkinter import filedialog, messagebox, ttk
 from core import (
     MAX_LENGTH,
     MIN_LENGTH,
+    PASSPHRASE_MAX_WORDS,
+    PASSPHRASE_MIN_WORDS,
     Record,
     Settings,
     Vault,
@@ -39,6 +41,7 @@ from core import (
     generate_password,
     generate_pin,
     normalize_totp_secret,
+    passphrase_entropy,
     strength_label,
     totp,
     totp_remaining,
@@ -288,6 +291,8 @@ class LockScreen(Screen):
         links.pack()
         ttk.Button(links, text="Другой файл…", style="Link.TButton",
                    command=self.choose_file).pack(side="left")
+        ttk.Button(links, text="Генератор без входа", style="Link.TButton",
+                   command=lambda: self.app.show("generator", back="lock")).pack(side="left")
 
     def path(self) -> Path:
         return self.app.settings.vault_file()
@@ -396,6 +401,7 @@ class ListScreen(Screen):
         self.toolbar = ttk.Frame(top)
         self.toolbar.pack(side="right", padx=(6, 0))
         self.add_tool("＋", "Новая запись (Ctrl+N)", lambda: self.app.show("edit"))
+        self.add_tool("⚄", "Генератор (Ctrl+G)", lambda: self.app.show("generator"))
         self.btn_pin = self.add_tool("▣", "Поверх всех окон", self.toggle_pin)
         self.add_tool("⏻", "Заблокировать (Ctrl+L)", self.app.lock)
         self._sync_pin()
@@ -732,7 +738,8 @@ class EditScreen(Screen):
             side="left", padx=(4, 0))
         gen = ttk.Button(pw, text="⚄", style="Icon.TButton", width=2, command=self.quick_generate)
         gen.pack(side="left")
-        Tooltip(gen, "Сгенерировать (настройки генератора)", self.theme)
+        gen.bind("<Button-3>", lambda _e: self.app.show("generator", for_edit=True))
+        Tooltip(gen, "Сгенерировать · правый клик — настройки", self.theme)
         self.entries["password"] = self.entry_password
 
         meter = ttk.Frame(form)
@@ -773,10 +780,17 @@ class EditScreen(Screen):
             widget.bind("<Escape>", lambda _e: self.cancel())
 
     def on_show(self, record_id: str | None = None, password: str | None = None,
-                **_kwargs) -> None:
+                keep: bool = False, **_kwargs) -> None:
         vault = self.app.vault
         if vault is None:
             self.app.show("lock")
+            return
+        if keep:
+            # Back from the generator: the form still holds what was typed.
+            if password is not None:
+                self.vars["password"].set(password)
+                self.var_show.set(True)
+                self._toggle_show()
             return
         rec = vault.get(record_id) if record_id else None
         self.record_id = rec.id if rec else None
@@ -880,6 +894,200 @@ class EditScreen(Screen):
         menu.tk_popup(x, y)
 
 
+class GeneratorScreen(Screen):
+    name = "generator"
+
+    def build(self) -> None:
+        st = self.app.settings
+        self.back = "list"
+        self.for_edit = False
+        self.var_mode = tk.StringVar(value=st.gen_mode)
+        self.var_length = tk.IntVar(value=st.gen_length)
+        self.var_lower = tk.BooleanVar(value=st.gen_lower)
+        self.var_upper = tk.BooleanVar(value=st.gen_upper)
+        self.var_digits = tk.BooleanVar(value=st.gen_digits)
+        self.var_symbols = tk.BooleanVar(value=st.gen_symbols)
+        self.var_full = tk.BooleanVar(value=st.gen_full_symbols)
+        self.var_ambiguous = tk.BooleanVar(value=st.gen_exclude_ambiguous)
+        self.var_words = tk.IntVar(value=st.gen_words)
+        self.var_sep = tk.StringVar(value=st.gen_separator)
+        self.var_pin = tk.IntVar(value=st.gen_pin_length)
+        self.password = ""
+
+        bar = ttk.Frame(self)
+        bar.pack(fill="x", pady=(0, 8))
+        self.btn_back = ttk.Button(bar, text="←", style="Icon.TButton", width=2,
+                                   command=self.go_back)
+        self.btn_back.pack(side="left")
+        ttk.Label(bar, text="Генератор", style="Title.TLabel").pack(side="left", padx=(4, 0))
+
+        seg = ttk.Frame(self)
+        seg.pack(fill="x")
+        for i, (value, text) in enumerate((("password", "Пароль"), ("passphrase", "Фраза"),
+                                           ("pin", "PIN"))):
+            seg.columnconfigure(i, weight=1, uniform="seg")
+            ttk.Radiobutton(seg, text=text, value=value, variable=self.var_mode,
+                            style="Segment.TRadiobutton", command=self.on_mode).grid(
+                row=0, column=i, sticky="ew")
+
+        card = ttk.Frame(self, style="Card.TFrame", padding=(12, 12))
+        card.pack(fill="x", pady=(10, 0))
+        self.lbl_out = ttk.Label(card, style="MonoBig.TLabel", wraplength=320,
+                                 justify="center", anchor="center", cursor="hand2")
+        self.lbl_out.pack(fill="x", ipady=6)
+        self.lbl_out.bind("<Button-1>", lambda _e: self.copy())
+        self.lbl_out.bind("<Configure>",
+                          lambda e: self.lbl_out.configure(wraplength=max(e.width - 8, 100)))
+        self.bar = StrengthBar(card, self.theme)
+        self.bar.pack(fill="x", pady=(8, 2))
+        self.lbl_strength = ttk.Label(card, style="CardMuted.TLabel")
+        self.lbl_strength.pack(anchor="w")
+
+        btns = ttk.Frame(self)
+        btns.pack(fill="x", pady=(8, 0))
+        btns.columnconfigure((0, 1, 2), weight=1, uniform="b")
+        ttk.Button(btns, text="↻ Ещё", style="Accent.TButton",
+                   command=self.generate).grid(row=0, column=0, sticky="ew")
+        ttk.Button(btns, text="Копировать", command=self.copy).grid(
+            row=0, column=1, sticky="ew", padx=6)
+        self.btn_save = ttk.Button(btns, command=self.use)
+        self.btn_save.grid(row=0, column=2, sticky="ew")
+
+        self.opts = ttk.Frame(self)
+        self.opts.pack(fill="both", expand=True, pady=(12, 0))
+        self._build_password_opts()
+        self._build_phrase_opts()
+        self._build_pin_opts()
+
+        for var in (self.var_lower, self.var_upper, self.var_digits, self.var_symbols,
+                    self.var_full, self.var_ambiguous, self.var_sep):
+            var.trace_add("write", lambda *_: self.on_change())
+
+    def _slider(self, parent, label: str, var: tk.IntVar, lo: int, hi: int) -> None:
+        row = ttk.Frame(parent)
+        row.pack(fill="x", pady=(0, 6))
+        ttk.Label(row, text=label).pack(side="left")
+        value = ttk.Label(row, text=str(var.get()), width=3, anchor="e", style="Bold.TLabel")
+        value.pack(side="right")
+
+        def moved(v: str) -> None:
+            n = int(float(v))
+            if n != var.get():
+                var.set(n)
+                self.on_change()
+            value.configure(text=str(n))
+
+        scale = ttk.Scale(row, from_=lo, to=hi, orient="horizontal", command=moved)
+        scale.set(var.get())
+        scale.pack(side="left", fill="x", expand=True, padx=8)
+
+    def _build_password_opts(self) -> None:
+        f = self.f_password = ttk.Frame(self.opts)
+        self._slider(f, "Длина", self.var_length, MIN_LENGTH, 64)
+        grid = ttk.Frame(f)
+        grid.pack(fill="x")
+        for i, (text, var) in enumerate((("a–z", self.var_lower), ("A–Z", self.var_upper),
+                                         ("0–9", self.var_digits), ("!#$%", self.var_symbols))):
+            grid.columnconfigure(i, weight=1, uniform="c")
+            ttk.Checkbutton(grid, text=text, variable=var).grid(row=0, column=i, sticky="w")
+        ttk.Checkbutton(f, text="Без похожих символов (I l 1 O 0)",
+                        variable=self.var_ambiguous).pack(anchor="w", pady=(8, 0))
+        ttk.Checkbutton(f, text="Все символы, включая кавычки и \\",
+                        variable=self.var_full).pack(anchor="w", pady=(4, 0))
+
+    def _build_phrase_opts(self) -> None:
+        f = self.f_phrase = ttk.Frame(self.opts)
+        self._slider(f, "Слов", self.var_words, PASSPHRASE_MIN_WORDS, PASSPHRASE_MAX_WORDS)
+        row = ttk.Frame(f)
+        row.pack(fill="x")
+        ttk.Label(row, text="Разделитель").pack(side="left")
+        box = ttk.Combobox(row, textvariable=self.var_sep, width=4,
+                           values=["-", ".", "_", " ", "+", "/"])
+        box.pack(side="left", padx=8)
+        ttk.Label(f, style="Muted.TLabel", wraplength=330, justify="left",
+                  text="Произносимые слова легче набрать и запомнить. "
+                       "Стойкость считается точно.").pack(anchor="w", pady=(8, 0))
+
+    def _build_pin_opts(self) -> None:
+        f = self.f_pin = ttk.Frame(self.opts)
+        self._slider(f, "Цифр", self.var_pin, 4, 12)
+        ttk.Label(f, style="Muted.TLabel", wraplength=330, justify="left",
+                  text="Только для карт, телефонов и замков: "
+                       "как пароль от сайта PIN слабый.").pack(anchor="w", pady=(4, 0))
+
+    def on_show(self, back: str = "list", for_edit: bool = False, **_kwargs) -> None:
+        self.back = back
+        self.for_edit = for_edit
+        if for_edit:
+            self.btn_save.configure(text="✓ Вставить", state="normal")
+        elif self.app.vault is not None:
+            self.btn_save.configure(text="В запись", state="normal")
+        else:
+            self.btn_save.configure(text="В запись", state="disabled")
+        self.on_mode(save=False)
+
+    def go_back(self) -> None:
+        if self.for_edit:
+            self.app.show("edit", keep=True)
+        else:
+            self.app.show(self.back)
+
+    def on_mode(self, save: bool = True) -> None:
+        for f in (self.f_password, self.f_phrase, self.f_pin):
+            f.pack_forget()
+        {"password": self.f_password, "passphrase": self.f_phrase,
+         "pin": self.f_pin}[self.var_mode.get()].pack(fill="both", expand=True)
+        self.on_change(save=save)
+
+    def on_change(self, save: bool = True) -> None:
+        st = self.app.settings
+        st.gen_mode = self.var_mode.get()
+        st.gen_length = self.var_length.get()
+        st.gen_lower, st.gen_upper = self.var_lower.get(), self.var_upper.get()
+        st.gen_digits, st.gen_symbols = self.var_digits.get(), self.var_symbols.get()
+        st.gen_full_symbols = self.var_full.get()
+        st.gen_exclude_ambiguous = self.var_ambiguous.get()
+        st.gen_words = self.var_words.get()
+        st.gen_separator = self.var_sep.get()[:3]
+        st.gen_pin_length = self.var_pin.get()
+        if save:
+            self.app.save_settings()
+        self.generate()
+
+    def generate(self) -> None:
+        st = self.app.settings
+        try:
+            self.password = generate_from_settings(st)
+        except ValueError as e:
+            self.password = ""
+            self.lbl_out.configure(text="—")
+            self.lbl_strength.configure(text=str(e), foreground=self.theme.c["danger"])
+            self.bar.set(0)
+            return
+        if st.gen_mode == "passphrase":
+            bits = passphrase_entropy(st.gen_words)
+        elif st.gen_mode == "pin":
+            bits = st.gen_pin_length * 3.32
+        else:
+            bits = estimate_entropy(self.password)
+        self.lbl_out.configure(text=self.password)
+        self.lbl_strength.configure(text=f"{strength_label(bits)} · {bits:.0f} бит · "
+                                         f"{len(self.password)} симв.",
+                                    foreground=self.theme.strength_color(bits))
+        self.bar.set(bits)
+
+    def copy(self) -> None:
+        self.app.copy(self.password, "Пароль")
+
+    def use(self) -> None:
+        if not self.password:
+            return
+        if self.for_edit:
+            self.app.show("edit", keep=True, password=self.password)
+        elif self.app.vault is not None:
+            self.app.show("edit", password=self.password)
+
+
 # ----------------------------------------------------------------------
 # helpers
 # ----------------------------------------------------------------------
@@ -948,7 +1156,7 @@ def strength_text(password: str) -> tuple[str, float]:
     return (f"{strength_label(bits)} · {bits:.0f} бит" if password else ""), bits
 
 
-SCREENS: list[type[Screen]] = [LockScreen, ListScreen, EditScreen]
+SCREENS: list[type[Screen]] = [LockScreen, ListScreen, EditScreen, GeneratorScreen]
 
 
 def run_app() -> None:
